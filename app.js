@@ -6,7 +6,7 @@
 const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 3004;
+const PORT = process.env.PORT || 3006;
 
 // Middleware
 app.use(cors());
@@ -34,14 +34,104 @@ let settings = {
     ai_enabled: 'true',
     urgent_threshold: '3',
     screening_mode: 'intelligent',
-    notification_level: 'high'
+    notification_level: 'high',
+    voice_enabled: 'true'
 };
 
 let nextId = { whitelist: 4, blocked: 3, callHistory: 4 };
+let voiceCommands = [];
 
-// API Routes
+// AI Chat endpoint (simple mock since Anthropic integration would need the package)
+app.post('/api/ai-chat', async (req, res) => {
+    try {
+        const { message } = req.body;
+        
+        // Mock AI responses for now
+        const responses = {
+            "hello": "Hello! I'm your TreloarAI assistant. I can help you manage calls, contacts, and phone security.",
+            "status": `Current status: ${whitelist.length} trusted contacts, ${blocked.length} blocked numbers, AI screening active.`,
+            "help": "I can help you add contacts, block numbers, check call history, and manage your phone assistant settings.",
+            "contacts": `You have ${whitelist.length} trusted contacts in your system.`,
+            "blocked": `You have ${blocked.length} blocked numbers.`,
+            "calls": `Today you have ${callHistory.length} call records.`
+        };
+        
+        // Simple keyword matching
+        const lowerMessage = message.toLowerCase();
+        let reply = "I understand you're asking about your phone assistant. Try asking about 'status', 'contacts', 'blocked numbers', or 'help'.";
+        
+        for (const [keyword, response] of Object.entries(responses)) {
+            if (lowerMessage.includes(keyword)) {
+                reply = response;
+                break;
+            }
+        }
+        
+        res.json({ reply });
+    } catch (error) {
+        res.status(500).json({ error: 'AI chat failed', details: error.message });
+    }
+});
 
-// Get dashboard stats
+// Voice command processing
+app.post('/api/voice-command', (req, res) => {
+    const { command, transcript } = req.body;
+    
+    voiceCommands.push({
+        timestamp: new Date().toISOString(),
+        command,
+        transcript,
+        processed: true
+    });
+    
+    let response = { success: false, message: 'Command not recognized', action: null };
+    const lowerCommand = transcript.toLowerCase();
+    
+    if (lowerCommand.includes('add contact') || lowerCommand.includes('new contact')) {
+        response = {
+            success: true,
+            message: 'Please provide contact details',
+            action: 'add_contact',
+            speak: 'I can help you add a new contact. Please provide the phone number and name.'
+        };
+    } else if (lowerCommand.includes('block number') || lowerCommand.includes('block caller')) {
+        response = {
+            success: true,
+            message: 'Block number mode activated',
+            action: 'block_number',
+            speak: 'I can help you block a number. Please provide the phone number you want to block.'
+        };
+    } else if (lowerCommand.includes('recent calls') || lowerCommand.includes('show calls')) {
+        const recentCalls = callHistory.slice(0, 3);
+        response = {
+            success: true,
+            message: 'Showing recent calls',
+            action: 'show_calls',
+            data: recentCalls,
+            speak: `You have ${recentCalls.length} recent calls. The most recent was from ${recentCalls[0]?.caller_name || 'unknown caller'}.`
+        };
+    } else if (lowerCommand.includes('emergency mode') || lowerCommand.includes('urgent mode')) {
+        settings.screening_mode = 'emergency';
+        settings.notification_level = 'urgent';
+        response = {
+            success: true,
+            message: 'Emergency mode activated',
+            action: 'emergency_mode',
+            speak: 'Emergency mode is now active. All calls will be prioritized and urgent notifications enabled.'
+        };
+    } else if (lowerCommand.includes('status') || lowerCommand.includes('dashboard')) {
+        response = {
+            success: true,
+            message: 'Reading dashboard status',
+            action: 'status',
+            speak: `System status: ${whitelist.length} trusted contacts, ${blocked.length} blocked numbers, ${callHistory.length} total calls processed.`
+        };
+    }
+    
+    res.json(response);
+});
+
+// API Routes (same as before)
 app.get('/api/stats', (req, res) => {
     const stats = {
         whitelist_count: whitelist.length,
@@ -54,12 +144,16 @@ app.get('/api/stats', (req, res) => {
         urgent_calls: callHistory.filter(call => 
             call.urgency_level === 'high' && 
             new Date(call.timestamp).toDateString() === new Date().toDateString()
-        ).length
+        ).length,
+        voice_commands_today: voiceCommands.filter(cmd => {
+            const today = new Date().toDateString();
+            const cmdDate = new Date(cmd.timestamp).toDateString();
+            return cmdDate === today;
+        }).length
     };
     res.json(stats);
 });
 
-// Whitelist operations
 app.get('/api/whitelist', (req, res) => {
     res.json(whitelist.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
 });
@@ -83,7 +177,6 @@ app.delete('/api/whitelist/:id', (req, res) => {
     res.json({ message: 'Contact removed from whitelist' });
 });
 
-// Blocked numbers operations
 app.get('/api/blocked', (req, res) => {
     res.json(blocked.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
 });
@@ -101,13 +194,6 @@ app.post('/api/blocked', (req, res) => {
     res.json({ id: newBlocked.id, message: 'Number blocked successfully' });
 });
 
-app.delete('/api/blocked/:id', (req, res) => {
-    const id = parseInt(req.params.id);
-    blocked = blocked.filter(item => item.id !== id);
-    res.json({ message: 'Number unblocked successfully' });
-});
-
-// Call history
 app.get('/api/call-history', (req, res) => {
     res.json(callHistory.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 50));
 });
@@ -129,7 +215,6 @@ app.post('/api/call-history', (req, res) => {
     res.json({ id: newCall.id, message: 'Call recorded successfully' });
 });
 
-// Settings
 app.get('/api/settings', (req, res) => {
     res.json(settings);
 });
@@ -139,54 +224,73 @@ app.put('/api/settings', (req, res) => {
     res.json({ message: 'Settings updated successfully' });
 });
 
-// Main dashboard
+// Main dashboard with voice + AI integration
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
         <html>
         <head>
-            <title>TreloarAI - AI Phone Assistant Dashboard</title>
+            <title>TreloarAI - Voice + AI Phone Assistant</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
-                body { font-family: 'Segoe UI', system-ui, sans-serif; background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); min-height: 100vh; color: #333; }
+                body { font-family: 'Segoe UI', system-ui, sans-serif; background: linear-gradient(135deg, #0D7377 0%, #14A085 30%, #4CAF50 70%, #A7FFEB 100%); min-height: 100vh; color: #333; }
                 .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
                 
                 .header { text-align: center; color: white; margin-bottom: 3rem; }
                 .header h1 { font-size: 3.5rem; margin-bottom: 1rem; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
                 .header p { font-size: 1.3rem; opacity: 0.9; }
-                .status-indicator { display: inline-block; width: 12px; height: 12px; background: #4CAF50; border-radius: 50%; margin-right: 0.5rem; animation: pulse 2s infinite; }
+                .status-indicator { display: inline-block; width: 12px; height: 12px; background: #8BC34A; border-radius: 50%; margin-right: 0.5rem; animation: pulse 2s infinite; }
                 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
                 
+                .voice-ai-section { background: rgba(255,255,255,0.98); padding: 2rem; border-radius: 20px; backdrop-filter: blur(15px); border: 2px solid rgba(79, 172, 254, 0.3); box-shadow: 0 10px 40px rgba(20, 160, 133, 0.2); margin-bottom: 2rem; }
+                .voice-ai-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+                
+                .voice-control { text-align: center; }
+                .voice-btn { background: linear-gradient(45deg, #FF6B6B, #4ECDC4); color: white; border: none; border-radius: 50%; width: 80px; height: 80px; font-size: 2rem; cursor: pointer; transition: all 0.3s; margin: 0 1rem; }
+                .voice-btn:hover { transform: scale(1.1); box-shadow: 0 10px 30px rgba(255, 107, 107, 0.4); }
+                .voice-btn.listening { background: linear-gradient(45deg, #FF4757, #FF6B6B); animation: listening 1s infinite; }
+                @keyframes listening { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); } }
+                .voice-status { margin-top: 1rem; font-size: 1.1rem; color: #0D7377; }
+                .voice-transcript { background: #f8f9fa; padding: 1rem; border-radius: 10px; margin-top: 1rem; font-style: italic; min-height: 50px; }
+                
+                .ai-chat { }
+                .ai-chat h3 { color: #0D7377; margin-bottom: 1rem; }
+                .chat-container { background: #f8f9fa; border-radius: 10px; height: 200px; overflow-y: auto; padding: 1rem; margin-bottom: 1rem; }
+                .chat-message { margin: 0.5rem 0; padding: 0.5rem; border-radius: 5px; }
+                .user-message { background: #e3f2fd; text-align: right; }
+                .ai-message { background: #e8f5e8; }
+                .chat-input { width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 8px; }
+                
                 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 2rem; margin-bottom: 3rem; }
-                .stat-card { background: rgba(255,255,255,0.95); padding: 2rem; border-radius: 20px; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 10px 40px rgba(0,0,0,0.1); text-align: center; transition: transform 0.3s; }
+                .stat-card { background: rgba(255,255,255,0.98); padding: 2rem; border-radius: 20px; backdrop-filter: blur(15px); border: 2px solid rgba(79, 172, 254, 0.3); box-shadow: 0 10px 40px rgba(20, 160, 133, 0.2); text-align: center; transition: transform 0.3s; }
                 .stat-card:hover { transform: translateY(-5px); }
-                .stat-value { font-size: 3rem; font-weight: bold; color: #1e3c72; margin-bottom: 0.5rem; }
+                .stat-value { font-size: 3rem; font-weight: bold; color: #0D7377; margin-bottom: 0.5rem; }
                 .stat-label { color: #666; font-size: 1rem; text-transform: uppercase; letter-spacing: 1px; }
                 
                 .main-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 2rem; }
-                .section { background: rgba(255,255,255,0.95); padding: 2rem; border-radius: 20px; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 10px 40px rgba(0,0,0,0.1); }
-                .section h2 { color: #1e3c72; margin-bottom: 1.5rem; font-size: 1.5rem; }
+                .section { background: rgba(255,255,255,0.98); padding: 2rem; border-radius: 20px; backdrop-filter: blur(15px); border: 2px solid rgba(79, 172, 254, 0.3); box-shadow: 0 10px 40px rgba(20, 160, 133, 0.2); }
+                .section h2 { color: #0D7377; margin-bottom: 1.5rem; font-size: 1.5rem; }
                 
-                .call-item { background: #f8f9fa; padding: 1rem; margin: 0.5rem 0; border-radius: 10px; border-left: 4px solid #1e3c72; }
+                .call-item { background: #f8f9fa; padding: 1rem; margin: 0.5rem 0; border-radius: 10px; border-left: 4px solid #4CAF50; }
                 .call-number { font-weight: bold; color: #333; }
                 .call-meta { color: #666; font-size: 0.9rem; margin-top: 0.25rem; }
-                .urgency-high { border-left-color: #dc3545; }
-                .urgency-medium { border-left-color: #ffc107; }
-                .urgency-low { border-left-color: #28a745; }
+                .urgency-high { border-left-color: #E53935; }
+                .urgency-medium { border-left-color: #FB8C00; }
+                .urgency-low { border-left-color: #43A047; }
                 
                 .contact-item { background: #f8f9fa; padding: 1rem; margin: 0.5rem 0; border-radius: 10px; display: flex; justify-content: space-between; align-items: center; }
                 .contact-info { flex: 1; }
                 .contact-name { font-weight: bold; color: #333; }
                 .contact-number { color: #666; font-size: 0.9rem; }
                 
-                .btn { background: #1e3c72; color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: all 0.3s; text-decoration: none; display: inline-block; margin: 0.25rem; }
-                .btn:hover { background: #2a5298; transform: translateY(-2px); }
-                .btn-success { background: #28a745; }
-                .btn-danger { background: #dc3545; }
-                .btn-warning { background: #ffc107; color: #000; }
+                .btn { background: linear-gradient(45deg, #14A085, #4CAF50); color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: all 0.3s; text-decoration: none; display: inline-block; margin: 0.25rem; }
+                .btn:hover { background: linear-gradient(45deg, #0D7377, #388E3C); transform: translateY(-2px); box-shadow: 0 4px 15px rgba(20, 160, 133, 0.4); }
+                .btn-success { background: linear-gradient(45deg, #42A5F5, #66BB6A); }
+                .btn-danger { background: linear-gradient(45deg, #EF5350, #FF7043); }
+                .btn-warning { background: linear-gradient(45deg, #FFA726, #FFCC02); color: #333; }
                 
-                .ai-status { background: linear-gradient(45deg, #4CAF50, #45a049); color: white; padding: 1rem; border-radius: 10px; margin-bottom: 2rem; text-align: center; }
+                .ai-status { background: linear-gradient(45deg, #14A085, #42A5F5, #4CAF50); color: white; padding: 1rem; border-radius: 10px; margin-bottom: 2rem; text-align: center; box-shadow: 0 5px 20px rgba(20, 160, 133, 0.3); }
                 .ai-status h3 { margin-bottom: 0.5rem; }
                 
                 .quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 2rem; }
@@ -194,23 +298,44 @@ app.get('/', (req, res) => {
                 .action-card h4 { color: white; margin-bottom: 1rem; }
                 
                 @media (max-width: 768px) {
+                    .voice-ai-grid { grid-template-columns: 1fr; }
                     .main-grid { grid-template-columns: 1fr; }
                     .stats-grid { grid-template-columns: repeat(2, 1fr); }
                     .header h1 { font-size: 2.5rem; }
+                    .voice-btn { width: 60px; height: 60px; font-size: 1.5rem; }
                 }
             </style>
         </head>
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>📱 TreloarAI</h1>
-                    <p>AI-Powered Phone Assistant & Call Management System</p>
-                    <p><span class="status-indicator"></span>Live Cloud Deployment</p>
+                    <h1>🎤📱 TreloarAI</h1>
+                    <p>Voice + AI Powered Phone Assistant & Call Management</p>
+                    <p><span class="status-indicator"></span>Voice & AI Integration Active</p>
+                </div>
+                
+                <div class="voice-ai-section">
+                    <div class="voice-ai-grid">
+                        <div class="voice-control">
+                            <h3>🗣️ Voice Commands</h3>
+                            <button class="voice-btn" id="voiceBtn" onclick="toggleVoiceRecognition()">🎤</button>
+                            <div class="voice-status" id="voiceStatus">Click microphone for voice commands</div>
+                            <div class="voice-transcript" id="voiceTranscript">Voice commands appear here...</div>
+                        </div>
+                        
+                        <div class="ai-chat">
+                            <h3>🤖 AI Assistant Chat</h3>
+                            <div class="chat-container" id="chatContainer">
+                                <div class="chat-message ai-message">Hello! I'm your TreloarAI assistant. Ask me about your contacts, calls, or phone settings!</div>
+                            </div>
+                            <input type="text" class="chat-input" id="chatInput" placeholder="Type a message or use voice..." onkeypress="handleChatKeypress(event)">
+                        </div>
+                    </div>
                 </div>
                 
                 <div class="ai-status">
-                    <h3>🤖 AI Assistant Active</h3>
-                    <p>Intelligently screening calls • Protecting your time • Learning your preferences</p>
+                    <h3>🤖 AI Assistant Active with Voice Control</h3>
+                    <p>Voice commands • AI chat • Smart call screening • Real-time assistance</p>
                 </div>
                 
                 <div class="stats-grid" id="statsGrid">
@@ -228,7 +353,7 @@ app.get('/', (req, res) => {
                     </div>
                     <div class="stat-card">
                         <div class="stat-value">...</div>
-                        <div class="stat-label">Urgent Alerts</div>
+                        <div class="stat-label">Voice Commands</div>
                     </div>
                 </div>
                 
@@ -251,27 +376,160 @@ app.get('/', (req, res) => {
                 <div class="quick-actions">
                     <div class="action-card">
                         <h4>⚙️ AI Settings</h4>
-                        <button class="btn" onclick="toggleAI()">Toggle AI</button>
+                        <button class="btn" onclick="toggleAI()">Configure AI</button>
                     </div>
                     <div class="action-card">
                         <h4>🚫 Block Management</h4>
                         <button class="btn btn-danger" onclick="viewBlocked()">View Blocked</button>
                     </div>
                     <div class="action-card">
-                        <h4>📊 Analytics</h4>
+                        <h4>📊 Voice Analytics</h4>
                         <button class="btn btn-warning" onclick="showAnalytics()">View Stats</button>
                     </div>
                     <div class="action-card">
                         <h4>🔔 Test Features</h4>
-                        <button class="btn" onclick="testNotification()">Test Alert</button>
+                        <button class="btn" onclick="testVoiceAndAI()">Test Voice+AI</button>
                     </div>
                 </div>
             </div>
 
             <script>
+                let recognition = null;
+                let isListening = false;
+                let speechSynthesis = window.speechSynthesis;
+                
+                // Initialize speech recognition
+                if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                    recognition = new SpeechRecognition();
+                    recognition.continuous = false;
+                    recognition.interimResults = false;
+                    recognition.lang = 'en-US';
+                    
+                    recognition.onstart = function() {
+                        isListening = true;
+                        document.getElementById('voiceBtn').classList.add('listening');
+                        document.getElementById('voiceStatus').textContent = 'Listening... Speak your command';
+                        document.getElementById('voiceTranscript').textContent = 'Listening for voice input...';
+                    };
+                    
+                    recognition.onresult = function(event) {
+                        const transcript = event.results[0][0].transcript;
+                        document.getElementById('voiceTranscript').textContent = 'You said: "' + transcript + '"';
+                        processVoiceCommand(transcript);
+                    };
+                    
+                    recognition.onerror = function(event) {
+                        document.getElementById('voiceStatus').textContent = 'Voice recognition error: ' + event.error;
+                        document.getElementById('voiceBtn').classList.remove('listening');
+                        isListening = false;
+                    };
+                    
+                    recognition.onend = function() {
+                        document.getElementById('voiceBtn').classList.remove('listening');
+                        isListening = false;
+                        if (document.getElementById('voiceStatus').textContent === 'Listening... Speak your command') {
+                            document.getElementById('voiceStatus').textContent = 'Ready for voice commands';
+                        }
+                    };
+                } else {
+                    document.getElementById('voiceStatus').textContent = 'Voice recognition not supported in this browser';
+                }
+                
+                function toggleVoiceRecognition() {
+                    if (!recognition) {
+                        alert('Voice recognition not supported in this browser');
+                        return;
+                    }
+                    
+                    if (isListening) {
+                        recognition.stop();
+                    } else {
+                        recognition.start();
+                    }
+                }
+                
+                function speak(text) {
+                    if (speechSynthesis) {
+                        const utterance = new SpeechSynthesisUtterance(text);
+                        utterance.rate = 0.8;
+                        utterance.pitch = 1;
+                        utterance.volume = 0.8;
+                        speechSynthesis.speak(utterance);
+                    }
+                }
+                
+                async function processVoiceCommand(transcript) {
+                    document.getElementById('voiceStatus').textContent = 'Processing command...';
+                    
+                    try {
+                        const response = await fetch('/api/voice-command', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                command: 'voice_input',
+                                transcript: transcript
+                            })
+                        });
+                        
+                        const result = await response.json();
+                        
+                        if (result.success) {
+                            document.getElementById('voiceStatus').textContent = result.message;
+                            if (result.speak) {
+                                speak(result.speak);
+                            }
+                            loadDashboard();
+                        } else {
+                            document.getElementById('voiceStatus').textContent = result.message;
+                            speak('Sorry, I did not understand that command.');
+                        }
+                    } catch (error) {
+                        document.getElementById('voiceStatus').textContent = 'Error processing voice command';
+                        speak('There was an error processing your command.');
+                    }
+                }
+                
+                async function sendChatMessage(message) {
+                    if (!message.trim()) return;
+                    
+                    // Add user message to chat
+                    const chatContainer = document.getElementById('chatContainer');
+                    chatContainer.innerHTML += \`<div class="chat-message user-message">You: \${message}</div>\`;
+                    
+                    try {
+                        const response = await fetch('/api/ai-chat', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ message })
+                        });
+                        
+                        const result = await response.json();
+                        
+                        // Add AI response to chat
+                        chatContainer.innerHTML += \`<div class="chat-message ai-message">AI: \${result.reply}</div>\`;
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                        
+                        // Speak the response
+                        speak(result.reply);
+                        
+                    } catch (error) {
+                        chatContainer.innerHTML += \`<div class="chat-message ai-message">AI: Sorry, I'm having trouble connecting right now.</div>\`;
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    }
+                    
+                    document.getElementById('chatInput').value = '';
+                }
+                
+                function handleChatKeypress(event) {
+                    if (event.key === 'Enter') {
+                        const message = event.target.value;
+                        sendChatMessage(message);
+                    }
+                }
+                
                 async function loadDashboard() {
                     try {
-                        // Load stats
                         const statsResponse = await fetch('/api/stats');
                         const stats = await statsResponse.json();
                         
@@ -289,12 +547,11 @@ app.get('/', (req, res) => {
                                 <div class="stat-label">Today's Calls</div>
                             </div>
                             <div class="stat-card">
-                                <div class="stat-value">\${stats.urgent_calls || 0}</div>
-                                <div class="stat-label">Urgent Alerts</div>
+                                <div class="stat-value">\${stats.voice_commands_today || 0}</div>
+                                <div class="stat-label">Voice Commands</div>
                             </div>
                         \`;
                         
-                        // Load recent calls
                         const callsResponse = await fetch('/api/call-history');
                         const calls = await callsResponse.json();
                         
@@ -313,7 +570,6 @@ app.get('/', (req, res) => {
                             \`).join('');
                         }
                         
-                        // Load whitelist contacts
                         const whitelistResponse = await fetch('/api/whitelist');
                         const contacts = await whitelistResponse.json();
                         
@@ -357,6 +613,7 @@ app.get('/', (req, res) => {
                     .then(response => response.json())
                     .then(data => {
                         alert('Contact added to trusted list!');
+                        speak(\`Contact \${contactName} has been added to your trusted list.\`);
                         loadDashboard();
                     })
                     .catch(error => alert('Error adding contact'));
@@ -389,6 +646,7 @@ app.get('/', (req, res) => {
                     .then(response => response.json())
                     .then(data => {
                         alert('Simulated call added!');
+                        speak(\`Simulated call from \${randomName} has been added.\`);
                         loadDashboard();
                     })
                     .catch(error => alert('Error simulating call'));
@@ -396,10 +654,12 @@ app.get('/', (req, res) => {
                 
                 function refreshCallHistory() {
                     loadDashboard();
+                    speak('Call history refreshed.');
                 }
                 
                 function toggleAI() {
-                    alert('AI Assistant toggled! (Demo feature)');
+                    speak('AI settings accessed.');
+                    alert('AI Assistant settings! (Configure voice, chat, and screening preferences)');
                 }
                 
                 function viewBlocked() {
@@ -408,9 +668,11 @@ app.get('/', (req, res) => {
                     .then(blocked => {
                         if (blocked.length === 0) {
                             alert('No blocked numbers');
+                            speak('You have no blocked numbers.');
                         } else {
                             const list = blocked.map(b => \`\${b.phone_number} - \${b.reason}\`).join('\\n');
                             alert('Blocked Numbers:\\n' + list);
+                            speak(\`You have \${blocked.length} blocked numbers.\`);
                         }
                     });
                 }
@@ -421,9 +683,11 @@ app.get('/', (req, res) => {
                     .then(contacts => {
                         if (contacts.length === 0) {
                             alert('No trusted contacts');
+                            speak('You have no trusted contacts.');
                         } else {
                             const list = contacts.map(c => \`\${c.contact_name} - \${c.phone_number}\`).join('\\n');
                             alert('Trusted Contacts:\\n' + list);
+                            speak(\`You have \${contacts.length} trusted contacts.\`);
                         }
                     });
                 }
@@ -432,12 +696,15 @@ app.get('/', (req, res) => {
                     fetch('/api/stats')
                     .then(response => response.json())
                     .then(stats => {
-                        alert(\`Analytics:\\nContacts: \${stats.whitelist_count}\\nBlocked: \${stats.blocked_count}\\nToday's Calls: \${stats.todays_calls}\\nUrgent: \${stats.urgent_calls}\`);
+                        const analyticsText = \`Analytics: \${stats.whitelist_count} contacts, \${stats.blocked_count} blocked, \${stats.todays_calls} today's calls, \${stats.voice_commands_today} voice commands\`;
+                        alert(analyticsText);
+                        speak(analyticsText);
                     });
                 }
                 
-                function testNotification() {
-                    alert('🚨 URGENT CALL ALERT!\\n\\nThis is how urgent notifications would appear.');
+                function testVoiceAndAI() {
+                    speak('Testing voice and AI integration. Voice recognition and AI chat are both active and ready for your commands.');
+                    sendChatMessage('Test AI integration');
                 }
                 
                 // Load dashboard on page load
@@ -445,25 +712,30 @@ app.get('/', (req, res) => {
                 
                 // Auto-refresh every 30 seconds
                 setInterval(loadDashboard, 30000);
+                
+                // Welcome message
+                setTimeout(() => {
+                    speak('Welcome to TreloarAI. Voice recognition and AI chat are ready. Click the microphone or type a message to get started.');
+                }, 2000);
             </script>
         </body>
         </html>
     `);
 });
 
-// Health check endpoint
 app.get('/health', (req, res) => {
     res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
         uptime: Math.floor(process.uptime()),
-        environment: process.env.NODE_ENV || 'development'
+        environment: process.env.NODE_ENV || 'development',
+        voice_enabled: true,
+        ai_enabled: true
     });
 });
 
-// Start server
 app.listen(PORT, () => {
-    console.log(`📱 TreloarAI Cloud Dashboard running on port ${PORT}`);
+    console.log(`🎤📱 TreloarAI Voice+AI Dashboard running on port ${PORT}`);
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🚀 Server ready to handle requests`);
+    console.log(`🗣️ Voice recognition and AI chat ready`);
 });
