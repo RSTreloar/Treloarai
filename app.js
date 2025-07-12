@@ -232,6 +232,14 @@ app.get('/', (req, res) => {
         <head>
             <title>TreloarAI - Voice + AI Phone Assistant</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta name="theme-color" content="#0D7377">
+            <meta name="apple-mobile-web-app-capable" content="yes">
+            <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+            <meta name="apple-mobile-web-app-title" content="TreloarAI">
+            <link rel="manifest" href="/manifest.json">
+            <link rel="apple-touch-icon" href="/icon-192.png">
+            <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+            <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
                 body { font-family: 'Segoe UI', system-ui, sans-serif; background: linear-gradient(135deg, #0D7377 0%, #14A085 30%, #4CAF50 70%, #A7FFEB 100%); min-height: 100vh; color: #333; }
@@ -707,6 +715,46 @@ app.get('/', (req, res) => {
                     sendChatMessage('Test AI integration');
                 }
                 
+                // PWA Installation
+                let deferredPrompt;
+                window.addEventListener('beforeinstallprompt', (e) => {
+                    e.preventDefault();
+                    deferredPrompt = e;
+                    showInstallButton();
+                });
+                
+                function showInstallButton() {
+                    const installBtn = document.createElement('button');
+                    installBtn.className = 'btn btn-success';
+                    installBtn.textContent = '📱 Install Mobile App';
+                    installBtn.onclick = installPWA;
+                    document.querySelector('.quick-actions').prepend(installBtn);
+                }
+                
+                async function installPWA() {
+                    if (deferredPrompt) {
+                        deferredPrompt.prompt();
+                        const result = await deferredPrompt.userChoice;
+                        if (result.outcome === 'accepted') {
+                            speak('TreloarAI mobile app installed successfully!');
+                        }
+                        deferredPrompt = null;
+                    }
+                }
+                
+                // Service Worker Registration
+                if ('serviceWorker' in navigator) {
+                    window.addEventListener('load', () => {
+                        navigator.serviceWorker.register('/sw.js')
+                            .then((registration) => {
+                                console.log('SW registered: ', registration);
+                            })
+                            .catch((registrationError) => {
+                                console.log('SW registration failed: ', registrationError);
+                            });
+                    });
+                }
+                
                 // Load dashboard on page load
                 loadDashboard();
                 
@@ -720,6 +768,119 @@ app.get('/', (req, res) => {
             </script>
         </body>
         </html>
+    `);
+});
+
+// PWA Manifest
+app.get('/manifest.json', (req, res) => {
+    res.json({
+        "name": "TreloarAI - AI Phone Assistant",
+        "short_name": "TreloarAI",
+        "description": "Voice-enabled AI phone assistant and call management system",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0D7377",
+        "theme_color": "#0D7377",
+        "orientation": "portrait",
+        "categories": ["productivity", "utilities"],
+        "icons": [
+            {
+                "src": "/icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any maskable"
+            },
+            {
+                "src": "/icon-512.png", 
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable"
+            }
+        ]
+    });
+});
+
+// Service Worker
+app.get('/sw.js', (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.send(`
+        const CACHE_NAME = 'treloarai-v1';
+        const urlsToCache = [
+            '/',
+            '/manifest.json'
+        ];
+
+        self.addEventListener('install', (event) => {
+            event.waitUntil(
+                caches.open(CACHE_NAME)
+                    .then((cache) => cache.addAll(urlsToCache))
+            );
+        });
+
+        self.addEventListener('fetch', (event) => {
+            event.respondWith(
+                caches.match(event.request)
+                    .then((response) => {
+                        if (response) {
+                            return response;
+                        }
+                        return fetch(event.request);
+                    })
+            );
+        });
+
+        // Background sync for offline functionality
+        self.addEventListener('sync', (event) => {
+            if (event.tag === 'background-sync') {
+                event.waitUntil(doBackgroundSync());
+            }
+        });
+
+        function doBackgroundSync() {
+            // Sync data when online
+            return Promise.resolve();
+        }
+
+        // Push notifications
+        self.addEventListener('push', (event) => {
+            const options = {
+                body: event.data ? event.data.text() : 'New notification from TreloarAI',
+                icon: '/icon-192.png',
+                badge: '/icon-192.png',
+                vibrate: [100, 50, 100],
+                data: {
+                    dateOfArrival: Date.now(),
+                    primaryKey: 1
+                }
+            };
+
+            event.waitUntil(
+                self.registration.showNotification('TreloarAI', options)
+            );
+        });
+    `);
+});
+
+// App Icons (simple SVG icons)
+app.get('/icon-192.png', (req, res) => {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.send(`
+        <svg width="192" height="192" viewBox="0 0 192 192" xmlns="http://www.w3.org/2000/svg">
+            <rect width="192" height="192" fill="#0D7377" rx="20"/>
+            <text x="96" y="96" text-anchor="middle" dominant-baseline="middle" font-size="80" fill="white">🎤</text>
+            <text x="96" y="140" text-anchor="middle" dominant-baseline="middle" font-size="20" fill="#A7FFEB">TreloarAI</text>
+        </svg>
+    `);
+});
+
+app.get('/icon-512.png', (req, res) => {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.send(`
+        <svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+            <rect width="512" height="512" fill="#0D7377" rx="50"/>
+            <text x="256" y="256" text-anchor="middle" dominant-baseline="middle" font-size="200" fill="white">🎤</text>
+            <text x="256" y="380" text-anchor="middle" dominant-baseline="middle" font-size="50" fill="#A7FFEB">TreloarAI</text>
+        </svg>
     `);
 });
 
