@@ -1,7 +1,9 @@
-const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+
+                
+                
+                            
+           const express = require('express');
 const cors = require('cors');
-const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3004;
@@ -10,191 +12,131 @@ const PORT = process.env.PORT || 3004;
 app.use(cors());
 app.use(express.json());
 
-// Database setup
-const db = new sqlite3.Database('./treloarai.db');
+// In-memory data storage (works in cloud environment)
+let whitelist = [
+    { id: 1, phone_number: '+1234567890', contact_name: 'Emergency Contact', relationship: 'Family', created_at: new Date().toISOString() },
+    { id: 2, phone_number: '+1987654321', contact_name: 'Dr. Smith', relationship: 'Doctor', created_at: new Date().toISOString() },
+    { id: 3, phone_number: '+1555123456', contact_name: 'Work Assistant', relationship: 'Professional', created_at: new Date().toISOString() }
+];
 
-// Initialize database
-db.serialize(() => {
-    // Whitelist table
-    db.run(`CREATE TABLE IF NOT EXISTS whitelist (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone_number TEXT UNIQUE,
-        contact_name TEXT,
-        relationship TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
+let blocked = [
+    { id: 1, phone_number: '+1800SPAM99', reason: 'Telemarketer', attempts: 5, created_at: new Date().toISOString() },
+    { id: 2, phone_number: '+1999ROBO00', reason: 'Robocall', attempts: 3, created_at: new Date().toISOString() }
+];
 
-    // Blocked numbers table
-    db.run(`CREATE TABLE IF NOT EXISTS blocked (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone_number TEXT UNIQUE,
-        reason TEXT,
-        attempts INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
+let callHistory = [
+    { id: 1, phone_number: '+1234567890', caller_name: 'Emergency Contact', call_type: 'urgent', duration: 120, urgency_level: 'high', status: 'answered', ai_action: 'immediate_notify', timestamp: new Date().toISOString() },
+    { id: 2, phone_number: '+1555999888', caller_name: 'Unknown Caller', call_type: 'screening', duration: 45, urgency_level: 'low', status: 'screened', ai_action: 'ai_handled', timestamp: new Date().toISOString() },
+    { id: 3, phone_number: '+1800SPAM99', caller_name: 'Telemarketer', call_type: 'blocked', duration: 0, urgency_level: 'none', status: 'blocked', ai_action: 'auto_block', timestamp: new Date().toISOString() }
+];
 
-    // Call history table
-    db.run(`CREATE TABLE IF NOT EXISTS call_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone_number TEXT,
-        caller_name TEXT,
-        call_type TEXT,
-        duration INTEGER,
-        transcript TEXT,
-        urgency_level TEXT,
-        status TEXT,
-        ai_action TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
+let settings = {
+    ai_enabled: 'true',
+    urgent_threshold: '3',
+    screening_mode: 'intelligent',
+    notification_level: 'high'
+};
 
-    // Call instructions table
-    db.run(`CREATE TABLE IF NOT EXISTS call_instructions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone_number TEXT UNIQUE,
-        instructions TEXT,
-        special_handling TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Settings table
-    db.run(`CREATE TABLE IF NOT EXISTS settings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        setting_name TEXT UNIQUE,
-        setting_value TEXT,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Insert sample data
-    db.get("SELECT COUNT(*) as count FROM whitelist", (err, row) => {
-        if (row.count === 0) {
-            db.run(`INSERT INTO whitelist (phone_number, contact_name, relationship) VALUES 
-                ('+1234567890', 'Emergency Contact', 'Family'),
-                ('+1987654321', 'Dr. Smith', 'Doctor'),
-                ('+1555123456', 'Work Assistant', 'Professional')`);
-            
-            db.run(`INSERT INTO blocked (phone_number, reason, attempts) VALUES 
-                ('+1800SPAM99', 'Telemarketer', 5),
-                ('+1999ROBO00', 'Robocall', 3)`);
-            
-            db.run(`INSERT INTO call_history (phone_number, caller_name, call_type, duration, urgency_level, status, ai_action) VALUES 
-                ('+1234567890', 'Emergency Contact', 'urgent', 120, 'high', 'answered', 'immediate_notify'),
-                ('+1555999888', 'Unknown Caller', 'screening', 45, 'low', 'screened', 'ai_handled'),
-                ('+1800SPAM99', 'Telemarketer', 'blocked', 0, 'none', 'blocked', 'auto_block')`);
-            
-            db.run(`INSERT INTO settings (setting_name, setting_value) VALUES 
-                ('ai_enabled', 'true'),
-                ('urgent_threshold', '3'),
-                ('screening_mode', 'intelligent'),
-                ('notification_level', 'high')`);
-        }
-    });
-});
+let nextId = { whitelist: 4, blocked: 3, callHistory: 4 };
 
 // API Routes
 
 // Get dashboard stats
 app.get('/api/stats', (req, res) => {
-    const stats = {};
-    
-    db.get("SELECT COUNT(*) as count FROM whitelist", (err, whitelistCount) => {
-        if (err) return res.status(500).json({ error: err.message });
-        stats.whitelist_count = whitelistCount.count;
-        
-        db.get("SELECT COUNT(*) as count FROM blocked", (err, blockedCount) => {
-            if (err) return res.status(500).json({ error: err.message });
-            stats.blocked_count = blockedCount.count;
-            
-            db.get("SELECT COUNT(*) as count FROM call_history WHERE date(timestamp) = date('now')", (err, todayCalls) => {
-                if (err) return res.status(500).json({ error: err.message });
-                stats.todays_calls = todayCalls.count;
-                
-                db.get("SELECT COUNT(*) as count FROM call_history WHERE urgency_level = 'high' AND date(timestamp) = date('now')", (err, urgentCalls) => {
-                    if (err) return res.status(500).json({ error: err.message });
-                    stats.urgent_calls = urgentCalls.count;
-                    
-                    res.json(stats);
-                });
-            });
-        });
-    });
+    const stats = {
+        whitelist_count: whitelist.length,
+        blocked_count: blocked.length,
+        todays_calls: callHistory.filter(call => {
+            const today = new Date().toDateString();
+            const callDate = new Date(call.timestamp).toDateString();
+            return callDate === today;
+        }).length,
+        urgent_calls: callHistory.filter(call => 
+            call.urgency_level === 'high' && 
+            new Date(call.timestamp).toDateString() === new Date().toDateString()
+        ).length
+    };
+    res.json(stats);
 });
 
 // Whitelist operations
 app.get('/api/whitelist', (req, res) => {
-    db.all("SELECT * FROM whitelist ORDER BY created_at DESC", (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
+    res.json(whitelist.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
 });
 
 app.post('/api/whitelist', (req, res) => {
     const { phone_number, contact_name, relationship } = req.body;
-    db.run("INSERT INTO whitelist (phone_number, contact_name, relationship) VALUES (?, ?, ?)",
-        [phone_number, contact_name, relationship], function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ id: this.lastID, message: 'Contact added to whitelist' });
-        });
+    const newContact = {
+        id: nextId.whitelist++,
+        phone_number,
+        contact_name,
+        relationship,
+        created_at: new Date().toISOString()
+    };
+    whitelist.push(newContact);
+    res.json({ id: newContact.id, message: 'Contact added to whitelist' });
 });
 
 app.delete('/api/whitelist/:id', (req, res) => {
-    db.run("DELETE FROM whitelist WHERE id = ?", [req.params.id], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ message: 'Contact removed from whitelist' });
-    });
+    const id = parseInt(req.params.id);
+    whitelist = whitelist.filter(contact => contact.id !== id);
+    res.json({ message: 'Contact removed from whitelist' });
 });
 
 // Blocked numbers operations
 app.get('/api/blocked', (req, res) => {
-    db.all("SELECT * FROM blocked ORDER BY created_at DESC", (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
+    res.json(blocked.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
 });
 
 app.post('/api/blocked', (req, res) => {
     const { phone_number, reason } = req.body;
-    db.run("INSERT INTO blocked (phone_number, reason) VALUES (?, ?)",
-        [phone_number, reason], function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ id: this.lastID, message: 'Number blocked successfully' });
-        });
+    const newBlocked = {
+        id: nextId.blocked++,
+        phone_number,
+        reason,
+        attempts: 1,
+        created_at: new Date().toISOString()
+    };
+    blocked.push(newBlocked);
+    res.json({ id: newBlocked.id, message: 'Number blocked successfully' });
+});
+
+app.delete('/api/blocked/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    blocked = blocked.filter(item => item.id !== id);
+    res.json({ message: 'Number unblocked successfully' });
 });
 
 // Call history
 app.get('/api/call-history', (req, res) => {
-    db.all("SELECT * FROM call_history ORDER BY timestamp DESC LIMIT 50", (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
+    res.json(callHistory.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 50));
+});
+
+app.post('/api/call-history', (req, res) => {
+    const { phone_number, caller_name, call_type, duration, urgency_level, status, ai_action } = req.body;
+    const newCall = {
+        id: nextId.callHistory++,
+        phone_number,
+        caller_name,
+        call_type,
+        duration,
+        urgency_level,
+        status,
+        ai_action,
+        timestamp: new Date().toISOString()
+    };
+    callHistory.push(newCall);
+    res.json({ id: newCall.id, message: 'Call recorded successfully' });
 });
 
 // Settings
 app.get('/api/settings', (req, res) => {
-    db.all("SELECT * FROM settings", (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        const settings = {};
-        rows.forEach(row => {
-            settings[row.setting_name] = row.setting_value;
-        });
-        res.json(settings);
-    });
+    res.json(settings);
 });
 
 app.put('/api/settings', (req, res) => {
-    const settings = req.body;
-    const promises = Object.keys(settings).map(key => {
-        return new Promise((resolve, reject) => {
-            db.run("INSERT OR REPLACE INTO settings (setting_name, setting_value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                [key, settings[key]], function(err) {
-                    if (err) reject(err);
-                    else resolve();
-                });
-        });
-    });
-    
-    Promise.all(promises)
-        .then(() => res.json({ message: 'Settings updated successfully' }))
-        .catch(err => res.status(500).json({ error: err.message }));
+    settings = { ...settings, ...req.body };
+    res.json({ message: 'Settings updated successfully' });
 });
 
 // Main dashboard
@@ -233,7 +175,7 @@ app.get('/', (req, res) => {
                 .urgency-medium { border-left-color: #ffc107; }
                 .urgency-low { border-left-color: #28a745; }
                 
-                .contact-item { background: #f8f9fa; padding: 1rem; margin: 0.5rem 0; border-radius: 10px; display: flex; justify-content: between; align-items: center; }
+                .contact-item { background: #f8f9fa; padding: 1rem; margin: 0.5rem 0; border-radius: 10px; display: flex; justify-content: space-between; align-items: center; }
                 .contact-info { flex: 1; }
                 .contact-name { font-weight: bold; color: #333; }
                 .contact-number { color: #666; font-size: 0.9rem; }
@@ -251,10 +193,6 @@ app.get('/', (req, res) => {
                 .action-card { background: rgba(255,255,255,0.1); padding: 1.5rem; border-radius: 15px; text-align: center; border: 1px solid rgba(255,255,255,0.2); }
                 .action-card h4 { color: white; margin-bottom: 1rem; }
                 
-                .form-group { margin: 1rem 0; }
-                .form-group label { display: block; margin-bottom: 0.5rem; font-weight: bold; }
-                .form-group input, .form-group select { width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 8px; }
-                
                 @media (max-width: 768px) {
                     .main-grid { grid-template-columns: 1fr; }
                     .stats-grid { grid-template-columns: repeat(2, 1fr); }
@@ -267,7 +205,7 @@ app.get('/', (req, res) => {
                 <div class="header">
                     <h1>📱 TreloarAI</h1>
                     <p>AI-Powered Phone Assistant & Call Management System</p>
-                    <p><span class="status-indicator"></span>System Online & Monitoring</p>
+                    <p><span class="status-indicator"></span>Live Cloud Deployment</p>
                 </div>
                 
                 <div class="ai-status">
@@ -299,33 +237,33 @@ app.get('/', (req, res) => {
                         <h2>📞 Recent Call Activity</h2>
                         <div id="callHistory">Loading call history...</div>
                         <button class="btn" onclick="refreshCallHistory()">Refresh</button>
-                        <a href="/call-history" class="btn btn-success">View All Calls</a>
+                        <button class="btn btn-success" onclick="simulateCall()">+ Simulate Call</button>
                     </div>
                     
                     <div class="section">
                         <h2>👥 Trusted Contacts</h2>
                         <div id="whitelistContacts">Loading contacts...</div>
                         <button class="btn" onclick="addToWhitelist()">+ Add Contact</button>
-                        <a href="/contacts" class="btn btn-success">Manage Contacts</a>
+                        <button class="btn btn-success" onclick="viewAllContacts()">View All</button>
                     </div>
                 </div>
                 
                 <div class="quick-actions">
                     <div class="action-card">
                         <h4>⚙️ AI Settings</h4>
-                        <a href="/settings" class="btn">Configure AI</a>
+                        <button class="btn" onclick="toggleAI()">Toggle AI</button>
                     </div>
                     <div class="action-card">
                         <h4>🚫 Block Management</h4>
-                        <a href="/blocked" class="btn btn-danger">View Blocked</a>
+                        <button class="btn btn-danger" onclick="viewBlocked()">View Blocked</button>
                     </div>
                     <div class="action-card">
                         <h4>📊 Analytics</h4>
-                        <a href="/analytics" class="btn btn-warning">View Reports</a>
+                        <button class="btn btn-warning" onclick="showAnalytics()">View Stats</button>
                     </div>
                     <div class="action-card">
-                        <h4>🔔 Notifications</h4>
-                        <a href="/notifications" class="btn">Manage Alerts</a>
+                        <h4>🔔 Test Features</h4>
+                        <button class="btn" onclick="testNotification()">Test Alert</button>
                     </div>
                 </div>
             </div>
@@ -424,8 +362,82 @@ app.get('/', (req, res) => {
                     .catch(error => alert('Error adding contact'));
                 }
                 
+                function simulateCall() {
+                    const numbers = ['+1555TEST01', '+1555DEMO99', '+1800EXAMPLE'];
+                    const names = ['Test Caller', 'Demo Contact', 'Example User'];
+                    const types = ['incoming', 'urgent', 'screening'];
+                    const urgencies = ['low', 'medium', 'high'];
+                    
+                    const randomNumber = numbers[Math.floor(Math.random() * numbers.length)];
+                    const randomName = names[Math.floor(Math.random() * names.length)];
+                    const randomType = types[Math.floor(Math.random() * types.length)];
+                    const randomUrgency = urgencies[Math.floor(Math.random() * urgencies.length)];
+                    
+                    fetch('/api/call-history', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            phone_number: randomNumber,
+                            caller_name: randomName,
+                            call_type: randomType,
+                            duration: Math.floor(Math.random() * 180),
+                            urgency_level: randomUrgency,
+                            status: 'handled',
+                            ai_action: 'processed'
+                        })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        alert('Simulated call added!');
+                        loadDashboard();
+                    })
+                    .catch(error => alert('Error simulating call'));
+                }
+                
                 function refreshCallHistory() {
                     loadDashboard();
+                }
+                
+                function toggleAI() {
+                    alert('AI Assistant toggled! (Demo feature)');
+                }
+                
+                function viewBlocked() {
+                    fetch('/api/blocked')
+                    .then(response => response.json())
+                    .then(blocked => {
+                        if (blocked.length === 0) {
+                            alert('No blocked numbers');
+                        } else {
+                            const list = blocked.map(b => \`\${b.phone_number} - \${b.reason}\`).join('\\n');
+                            alert('Blocked Numbers:\\n' + list);
+                        }
+                    });
+                }
+                
+                function viewAllContacts() {
+                    fetch('/api/whitelist')
+                    .then(response => response.json())
+                    .then(contacts => {
+                        if (contacts.length === 0) {
+                            alert('No trusted contacts');
+                        } else {
+                            const list = contacts.map(c => \`\${c.contact_name} - \${c.phone_number}\`).join('\\n');
+                            alert('Trusted Contacts:\\n' + list);
+                        }
+                    });
+                }
+                
+                function showAnalytics() {
+                    fetch('/api/stats')
+                    .then(response => response.json())
+                    .then(stats => {
+                        alert(\`Analytics:\\nContacts: \${stats.whitelist_count}\\nBlocked: \${stats.blocked_count}\\nToday's Calls: \${stats.todays_calls}\\nUrgent: \${stats.urgent_calls}\`);
+                    });
+                }
+                
+                function testNotification() {
+                    alert('🚨 URGENT CALL ALERT!\\n\\nThis is how urgent notifications would appear.');
                 }
                 
                 // Load dashboard on page load
@@ -439,75 +451,19 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Contacts management page
-app.get('/contacts', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Contacts - TreloarAI</title>
-            <style>
-                body { font-family: Arial, sans-serif; margin: 2rem; background: #f5f7fa; }
-                .container { max-width: 1000px; margin: 0 auto; }
-                .header { background: white; padding: 2rem; border-radius: 10px; margin-bottom: 2rem; }
-                .contact-grid { display: grid; gap: 1rem; }
-                .contact-card { background: white; padding: 1.5rem; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-                .btn { background: #1e3c72; color: white; padding: 0.5rem 1rem; text-decoration: none; border-radius: 5px; border: none; cursor: pointer; }
-                .btn-danger { background: #dc3545; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>👥 Trusted Contacts</h1>
-                    <a href="/" class="btn">← Back to Dashboard</a>
-                </div>
-                <div class="contact-grid" id="contactsGrid">Loading...</div>
-            </div>
-            <script>
-                async function loadContacts() {
-                    const response = await fetch('/api/whitelist');
-                    const contacts = await response.json();
-                    
-                    document.getElementById('contactsGrid').innerHTML = contacts.map(contact => \`
-                        <div class="contact-card">
-                            <h3>\${contact.contact_name}</h3>
-                            <p>📞 \${contact.phone_number}</p>
-                            <p>👤 \${contact.relationship}</p>
-                            <p>📅 Added: \${new Date(contact.created_at).toLocaleDateString()}</p>
-                            <button class="btn btn-danger" onclick="removeContact(\${contact.id})">Remove</button>
-                        </div>
-                    \`).join('');
-                }
-                
-                function removeContact(id) {
-                    if (confirm('Remove this contact from trusted list?')) {
-                        fetch(\`/api/whitelist/\${id}\`, { method: 'DELETE' })
-                        .then(() => loadContacts())
-                        .catch(error => alert('Error removing contact'));
-                    }
-                }
-                
-                loadContacts();
-            </script>
-        </body>
-        </html>
-    `);
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        uptime: Math.floor(process.uptime()),
+        environment: process.env.NODE_ENV || 'development'
+    });
 });
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`📱 TreloarAI Dashboard running on port ${PORT}`);
-    console.log(`🌐 Access your AI phone assistant at http://localhost:${PORT}`);
-    console.log(`📊 API endpoints available at /api/*`);
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\n🛑 Shutting down TreloarAI...');
-    db.close((err) => {
-        if (err) console.error('Database close error:', err);
-        else console.log('📱 TreloarAI database closed');
-        process.exit(0);
-    });
+    console.log(`📱 TreloarAI Cloud Dashboard running on port ${PORT}`);
+    console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🚀 Server ready to handle requests`);
 });
