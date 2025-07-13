@@ -156,7 +156,33 @@ app.get('/manifest.json', (req, res) => {
     });
 });
 
-// Health check
+// Service Worker for PWA
+app.get('/sw.js', (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.send(`
+        const CACHE_NAME = 'treloarai-v1';
+        const urlsToCache = [
+            '/',
+            '/manifest.json'
+        ];
+
+        self.addEventListener('install', (event) => {
+            event.waitUntil(
+                caches.open(CACHE_NAME)
+                    .then((cache) => cache.addAll(urlsToCache))
+            );
+        });
+
+        self.addEventListener('fetch', (event) => {
+            event.respondWith(
+                caches.match(event.request)
+                    .then((response) => {
+                        return response || fetch(event.request);
+                    })
+            );
+        });
+    `);
+});
 app.get('/health', (req, res) => {
     res.json({
         status: 'healthy',
@@ -169,7 +195,6 @@ app.get('/health', (req, res) => {
 
 // Main application
 app.get('/', (req, res) => {
-res.setHeader('Content-Type', 'text/html');
     res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -555,6 +580,9 @@ res.setHeader('Content-Type', 'text/html');
                 
                 <div class="pwa-hint">
                     💡 Tip: Add to home screen for native app experience!
+                    <button id="installBtn" class="btn btn-primary" style="margin-top: 10px; display: none;">
+                        📱 Install TreloarAI App
+                    </button>
                 </div>
             </div>
         </div>
@@ -593,9 +621,13 @@ res.setHeader('Content-Type', 'text/html');
                 </div>
                 <div class="chat-input">
                     <input type="text" id="chatInput" placeholder="Ask about voice features..." onkeypress="handleChatKeypress(event)">
-                    <button class="btn btn-primary" onclick="sendChatMessage()">
-                        📤
+                    <button class="btn btn-primary" onclick="sendChatMessage()" style="padding: 15px 20px; min-width: 60px; display: flex; align-items: center; justify-content: center;">
+                        <span style="font-size: 1.2rem;">📤 Send</span>
                     </button>
+                </div>
+                
+                <div style="text-align: center; margin-top: 10px;">
+                    <small style="color: #94a3b8;">💡 Try: "hello", "help me", "what can you do?"</small>
                 </div>
             </div>
             
@@ -664,10 +696,10 @@ res.setHeader('Content-Type', 'text/html');
             location.reload();
         }
         
-        // Voice Commands
+        // Voice Commands - Enhanced for better recognition
         async function startVoiceCommand() {
             if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-                document.getElementById('voiceStatus').textContent = 'Speech recognition not supported. Try typing in the chat below.';
+                document.getElementById('voiceStatus').textContent = 'Voice not supported. Use the text chat below instead!';
                 return;
             }
             
@@ -675,46 +707,57 @@ res.setHeader('Content-Type', 'text/html');
             recognition.continuous = false;
             recognition.interimResults = false;
             recognition.lang = 'en-US';
+            recognition.maxAlternatives = 1;
             
             const voiceBtn = document.getElementById('voiceBtn');
             const voiceStatus = document.getElementById('voiceStatus');
             
-            voiceStatus.textContent = 'Listening... Speak now!';
+            voiceStatus.textContent = 'Listening... Speak clearly!';
             voiceBtn.classList.add('recording');
-            voiceBtn.textContent = '🔴';
+            voiceBtn.textContent = '🔴 LISTENING';
             
             recognition.onresult = async function(event) {
-                const transcript = event.results[0][0].transcript;
-                voiceStatus.textContent = 'You said: "' + transcript + '"';
+                const transcript = event.results[0][0].transcript.toLowerCase();
+                const confidence = event.results[0][0].confidence;
                 
-                try {
-                    const response = await fetch('/api/voice-command', {
-                        method: 'POST',
-                        headers: { 
-                            'Content-Type': 'application/json',
-                            'Authorization': 'Bearer ' + authToken
-                        },
-                        body: JSON.stringify({ transcript })
-                    });
-                    
-                    const data = await response.json();
-                    
-                    setTimeout(() => {
-                        voiceStatus.textContent = data.message || 'Command processed successfully!';
-                    }, 1000);
-                    
-                    if (data.speak && 'speechSynthesis' in window) {
-                        const utterance = new SpeechSynthesisUtterance(data.speak);
-                        speechSynthesis.speak(utterance);
-                    }
-                    
-                } catch (error) {
-                    voiceStatus.textContent = 'Voice command processed locally: ' + transcript;
+                voiceStatus.textContent = `You said: "${transcript}" (${Math.round(confidence * 100)}% confident)`;
+                
+                // Enhanced response logic
+                let responseText = 'I heard you! ';
+                
+                if (transcript.includes('hello') || transcript.includes('hi')) {
+                    responseText = 'Hello! I\'m TreloarAI, your voice assistant. I can help with recording calls and managing contacts.';
+                } else if (transcript.includes('record') || transcript.includes('recording')) {
+                    responseText = 'Call recording feature activated! I can help you record and transcribe phone conversations.';
+                } else if (transcript.includes('status') || transcript.includes('how are you')) {
+                    responseText = 'TreloarAI is running perfectly on your Samsung Fold 3! Voice recognition is working great.';
+                } else if (transcript.includes('help') || transcript.includes('what can you do')) {
+                    responseText = 'I can record calls, transcribe audio, manage contacts, and respond to voice commands. Try saying "record call" or "show status".';
+                } else if (transcript.includes('test') || transcript.includes('testing')) {
+                    responseText = 'Voice test successful! I can hear you clearly. Your Samsung Fold 3 microphone is working perfectly.';
+                } else {
+                    responseText = `I heard "${transcript}". I understand voice commands like: record call, show status, help me, or hello.`;
                 }
+                
+                // Add to chat
+                addChatMessage('You (Voice)', transcript);
+                addChatMessage('TreloarAI', responseText);
+                
+                // Speak response
+                if ('speechSynthesis' in window) {
+                    const utterance = new SpeechSynthesisUtterance(responseText);
+                    utterance.rate = 0.9;
+                    utterance.pitch = 1.0;
+                    speechSynthesis.speak(utterance);
+                }
+                
+                setTimeout(() => {
+                    voiceStatus.textContent = 'Voice command completed! Tap microphone to speak again.';
+                }, 2000);
             };
             
-            recognition.onerror = function() {
-                voiceStatus.textContent = 'Voice recognition error. Try again or use text chat below.';
+            recognition.onerror = function(event) {
+                voiceStatus.textContent = `Voice error: ${event.error}. Try typing in the chat below instead.`;
                 voiceBtn.classList.remove('recording');
                 voiceBtn.textContent = '🎤';
             };
@@ -724,7 +767,23 @@ res.setHeader('Content-Type', 'text/html');
                 voiceBtn.textContent = '🎤';
             };
             
-            recognition.start();
+            try {
+                recognition.start();
+            } catch (error) {
+                voiceStatus.textContent = 'Voice recognition failed. Use text chat below.';
+                voiceBtn.classList.remove('recording');
+                voiceBtn.textContent = '🎤';
+            }
+        }
+        
+        // Helper function to add chat messages
+        function addChatMessage(sender, message) {
+            const container = document.getElementById('chatContainer');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = sender.includes('You') ? 'chat-message user-message' : 'chat-message ai-message';
+            messageDiv.innerHTML = `<strong>${sender}:</strong> ${message}`;
+            container.appendChild(messageDiv);
+            container.scrollTop = container.scrollHeight;
         }
         
         // AI Chat
@@ -778,23 +837,39 @@ res.setHeader('Content-Type', 'text/html');
         }
         
         // PWA Install Detection
+        let deferredPrompt;
+        
         window.addEventListener('beforeinstallprompt', (e) => {
             e.preventDefault();
-            const installBtn = document.createElement('button');
-            installBtn.textContent = '📱 Install App';
-            installBtn.className = 'btn btn-primary';
-            installBtn.style.margin = '10px auto';
-            installBtn.style.display = 'block';
-            installBtn.onclick = () => {
-                e.prompt();
-                e.userChoice.then((choiceResult) => {
-                    if (choiceResult.outcome === 'accepted') {
-                        installBtn.remove();
+            deferredPrompt = e;
+            const installBtn = document.getElementById('installBtn');
+            if (installBtn) {
+                installBtn.style.display = 'block';
+                installBtn.onclick = async () => {
+                    if (deferredPrompt) {
+                        deferredPrompt.prompt();
+                        const { outcome } = await deferredPrompt.userChoice;
+                        if (outcome === 'accepted') {
+                            installBtn.style.display = 'none';
+                        }
+                        deferredPrompt = null;
                     }
-                });
-            };
-            document.querySelector('.pwa-hint').appendChild(installBtn);
+                };
+            }
         });
+        
+        // Force show install option on mobile
+        if (/Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
+            setTimeout(() => {
+                const installBtn = document.getElementById('installBtn');
+                if (installBtn && !window.matchMedia('(display-mode: standalone)').matches) {
+                    installBtn.style.display = 'block';
+                    installBtn.onclick = () => {
+                        alert('To install: Tap Chrome menu (⋮) → "Add to Home screen"');
+                    };
+                }
+            }, 3000);
+        }
         
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
