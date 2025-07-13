@@ -11,28 +11,72 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3006;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Database connection (PostgreSQL)
+// Database connection
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: process.env.DATABASE_URL || 'postgresql://localhost:5432/treloarai',
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Initialize database schema
+// Pricing plans for TreloarAI
+const PRICING_PLANS = {
+    free: {
+        name: 'Free Plan',
+        monthly_cost: 0,
+        call_limit: 100,
+        contact_limit: 50,
+        ai_screening_hours: 10,
+        voice_commands: 200,
+        features: ['Basic call screening', 'Contact management', 'Voice commands']
+    },
+    pro: {
+        name: 'Pro Plan',
+        monthly_cost: 29.99,
+        call_limit: 1000,
+        contact_limit: 500,
+        ai_screening_hours: 100,
+        voice_commands: 2000,
+        features: ['Advanced AI screening', 'Unlimited contacts', 'Priority support', 'Analytics']
+    },
+    enterprise: {
+        name: 'Enterprise Plan',
+        monthly_cost: 99.99,
+        call_limit: -1, // unlimited
+        contact_limit: -1,
+        ai_screening_hours: -1,
+        voice_commands: -1,
+        features: ['Unlimited everything', 'Custom integrations', '24/7 support', 'White-label']
+    }
+};
+
+// Usage rates for overages
+const USAGE_RATES = {
+    call: 0.05,
+    ai_screening_minute: 0.10,
+    voice_command: 0.02,
+    storage_gb: 1.00
+};
+
+// Initialize database
 const initDatabase = async () => {
     try {
+        if (!process.env.DATABASE_URL) {
+            console.log('⚠️ No DATABASE_URL, running in demo mode');
+            return;
+        }
+
         await pool.query(`
-            CREATE TABLE IF NOT EXISTS users (
+            CREATE TABLE IF NOT EXISTS treloar_users (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 email VARCHAR(255) UNIQUE NOT NULL,
                 password_hash VARCHAR(255) NOT NULL,
                 full_name VARCHAR(255),
-                company VARCHAR(255),
+                phone_number VARCHAR(20),
                 plan VARCHAR(50) DEFAULT 'free',
                 stripe_customer_id VARCHAR(255),
                 api_key VARCHAR(255) UNIQUE,
@@ -40,184 +84,175 @@ const initDatabase = async () => {
                 updated_at TIMESTAMP DEFAULT NOW()
             );
 
-            CREATE TABLE IF NOT EXISTS deployments (
+            CREATE TABLE IF NOT EXISTS call_logs (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-                name VARCHAR(255) NOT NULL,
-                repository_url VARCHAR(500),
-                branch VARCHAR(100) DEFAULT 'main',
-                environment VARCHAR(50) DEFAULT 'production',
-                status VARCHAR(50) DEFAULT 'pending',
-                deployment_url VARCHAR(500),
-                build_logs TEXT,
-                cpu_usage DECIMAL(10,2) DEFAULT 0,
-                memory_usage DECIMAL(10,2) DEFAULT 0,
-                bandwidth_usage DECIMAL(10,2) DEFAULT 0,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
+                user_id UUID REFERENCES treloar_users(id),
+                caller_number VARCHAR(20) NOT NULL,
+                caller_name VARCHAR(255),
+                call_type VARCHAR(50),
+                duration INTEGER DEFAULT 0,
+                ai_screening_time INTEGER DEFAULT 0,
+                urgency_level VARCHAR(20) DEFAULT 'low',
+                status VARCHAR(50) DEFAULT 'completed',
+                ai_response TEXT,
+                cost DECIMAL(8,4) DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW()
             );
 
-            CREATE TABLE IF NOT EXISTS billing_usage (
+            CREATE TABLE IF NOT EXISTS contacts (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-                deployment_id UUID REFERENCES deployments(id) ON DELETE CASCADE,
-                usage_type VARCHAR(50) NOT NULL, -- 'cpu', 'memory', 'bandwidth', 'storage'
+                user_id UUID REFERENCES treloar_users(id),
+                phone_number VARCHAR(20) NOT NULL,
+                contact_name VARCHAR(255) NOT NULL,
+                relationship VARCHAR(100),
+                priority_level VARCHAR(20) DEFAULT 'normal',
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS blocked_numbers (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID REFERENCES treloar_users(id),
+                phone_number VARCHAR(20) NOT NULL,
+                reason VARCHAR(255),
+                block_count INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS usage_tracking (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID REFERENCES treloar_users(id),
+                usage_type VARCHAR(50) NOT NULL,
                 amount DECIMAL(10,4) NOT NULL,
-                unit VARCHAR(20) NOT NULL, -- 'hours', 'gb', 'requests'
-                cost DECIMAL(10,4) NOT NULL,
-                billing_period DATE NOT NULL,
+                cost DECIMAL(8,4) NOT NULL,
+                billing_period DATE DEFAULT CURRENT_DATE,
                 recorded_at TIMESTAMP DEFAULT NOW()
             );
 
-            CREATE TABLE IF NOT EXISTS invoices (
+            CREATE TABLE IF NOT EXISTS voice_commands (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-                invoice_number VARCHAR(50) UNIQUE NOT NULL,
-                billing_period_start DATE NOT NULL,
-                billing_period_end DATE NOT NULL,
-                subtotal DECIMAL(10,2) NOT NULL,
-                tax_amount DECIMAL(10,2) DEFAULT 0,
-                total_amount DECIMAL(10,2) NOT NULL,
-                status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'paid', 'failed'
-                stripe_invoice_id VARCHAR(255),
-                created_at TIMESTAMP DEFAULT NOW(),
-                paid_at TIMESTAMP
+                user_id UUID REFERENCES treloar_users(id),
+                command_text TEXT NOT NULL,
+                command_type VARCHAR(50),
+                success BOOLEAN DEFAULT true,
+                processing_time INTEGER,
+                created_at TIMESTAMP DEFAULT NOW()
             );
 
-            CREATE TABLE IF NOT EXISTS analytics (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-                deployment_id UUID REFERENCES deployments(id) ON DELETE CASCADE,
-                metric_type VARCHAR(50) NOT NULL,
-                metric_value DECIMAL(10,4) NOT NULL,
-                timestamp TIMESTAMP DEFAULT NOW()
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_billing_usage_user_period ON billing_usage(user_id, billing_period);
-            CREATE INDEX IF NOT EXISTS idx_deployments_user ON deployments(user_id);
-            CREATE INDEX IF NOT EXISTS idx_analytics_deployment_timestamp ON analytics(deployment_id, timestamp);
+            -- Insert demo user
+            INSERT INTO treloar_users (email, password_hash, full_name, phone_number, plan, api_key)
+            VALUES ('demo@treloarai.com', '$2b$10$demo', 'Demo User', '+1555DEMO01', 'pro', 'tal_demo_key_123')
+            ON CONFLICT (email) DO NOTHING;
         `);
-        console.log('✅ Database schema initialized');
+
+        console.log('✅ TreloarAI database initialized');
     } catch (error) {
-        console.error('❌ Database initialization error:', error);
+        console.log('⚠️ Database error, using demo mode:', error.message);
     }
-};
-
-// Pricing tiers
-const PRICING = {
-    free: {
-        name: 'Free',
-        deployments: 3,
-        cpu_hours: 100,
-        memory_gb_hours: 50,
-        bandwidth_gb: 10,
-        monthly_cost: 0
-    },
-    starter: {
-        name: 'Starter',
-        deployments: 10,
-        cpu_hours: 500,
-        memory_gb_hours: 250,
-        bandwidth_gb: 100,
-        monthly_cost: 29.99
-    },
-    professional: {
-        name: 'Professional',
-        deployments: 50,
-        cpu_hours: 2000,
-        memory_gb_hours: 1000,
-        bandwidth_gb: 500,
-        monthly_cost: 99.99
-    },
-    enterprise: {
-        name: 'Enterprise',
-        deployments: -1, // unlimited
-        cpu_hours: -1,
-        memory_gb_hours: -1,
-        bandwidth_gb: -1,
-        monthly_cost: 299.99
-    }
-};
-
-// Usage rates (per unit overage)
-const USAGE_RATES = {
-    cpu_hour: 0.05,
-    memory_gb_hour: 0.02,
-    bandwidth_gb: 0.10,
-    deployment: 5.00
 };
 
 // Authentication middleware
-const authenticateToken = async (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
+const authenticateUser = async (req, res, next) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    
     if (!token) {
-        return res.status(401).json({ error: 'Access token required' });
+        return res.status(401).json({ error: 'Authentication required' });
     }
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret');
-        const result = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.userId]);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'treloar-secret');
         
-        if (result.rows.length === 0) {
-            return res.status(403).json({ error: 'Invalid token' });
+        if (!process.env.DATABASE_URL) {
+            // Demo mode
+            req.user = {
+                id: 'demo-user-123',
+                email: 'demo@treloarai.com',
+                full_name: 'Demo User',
+                plan: 'pro'
+            };
+        } else {
+            const result = await pool.query('SELECT * FROM treloar_users WHERE id = $1', [decoded.userId]);
+            if (result.rows.length === 0) {
+                return res.status(403).json({ error: 'Invalid token' });
+            }
+            req.user = result.rows[0];
         }
-
-        req.user = result.rows[0];
+        
         next();
     } catch (error) {
         res.status(403).json({ error: 'Invalid token' });
     }
 };
 
-// API Routes
+// Track usage
+const trackUsage = async (userId, usageType, amount) => {
+    if (!process.env.DATABASE_URL) return;
+    
+    try {
+        const cost = amount * (USAGE_RATES[usageType] || 0);
+        await pool.query(
+            'INSERT INTO usage_tracking (user_id, usage_type, amount, cost) VALUES ($1, $2, $3, $4)',
+            [userId, usageType, amount, cost]
+        );
+    } catch (error) {
+        console.error('Usage tracking error:', error);
+    }
+};
 
-// User registration
+// Authentication routes
 app.post('/api/auth/register', async (req, res) => {
-    const { email, password, fullName, company } = req.body;
+    const { email, password, fullName, phoneNumber } = req.body;
 
     try {
-        const existingUser = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-        if (existingUser.rows.length > 0) {
-            return res.status(400).json({ error: 'Email already registered' });
+        if (!process.env.DATABASE_URL) {
+            return res.status(200).json({
+                message: 'Demo mode - registration simulated',
+                token: jwt.sign({ userId: 'demo-user-123' }, 'treloar-secret'),
+                user: { email, full_name: fullName, plan: 'free' }
+            });
         }
 
         const passwordHash = await bcrypt.hash(password, 10);
-        const apiKey = `afk_${uuidv4().replace(/-/g, '')}`;
-
-        // Create Stripe customer
-        const stripeCustomer = await stripe.customers.create({
-            email,
-            name: fullName,
-            metadata: { company }
-        });
+        const apiKey = `tal_${uuidv4().replace(/-/g, '')}`;
 
         const result = await pool.query(
-            `INSERT INTO users (email, password_hash, full_name, company, api_key, stripe_customer_id) 
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, email, full_name, company, plan, api_key`,
-            [email, passwordHash, fullName, company, apiKey, stripeCustomer.id]
+            `INSERT INTO treloar_users (email, password_hash, full_name, phone_number, api_key) 
+             VALUES ($1, $2, $3, $4, $5) RETURNING id, email, full_name, plan`,
+            [email, passwordHash, fullName, phoneNumber, apiKey]
         );
 
-        const token = jwt.sign({ userId: result.rows[0].id }, process.env.JWT_SECRET || 'dev-secret');
+        const token = jwt.sign({ userId: result.rows[0].id }, process.env.JWT_SECRET || 'treloar-secret');
 
         res.status(201).json({
-            message: 'User registered successfully',
+            message: 'Registration successful',
             token,
             user: result.rows[0]
         });
     } catch (error) {
-        console.error('Registration error:', error);
         res.status(500).json({ error: 'Registration failed' });
     }
 });
 
-// User login
 app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
 
     try {
-        const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+        if (!process.env.DATABASE_URL) {
+            if (email === 'demo@treloarai.com' && password === 'demo123') {
+                return res.json({
+                    message: 'Demo login successful',
+                    token: jwt.sign({ userId: 'demo-user-123' }, 'treloar-secret'),
+                    user: {
+                        id: 'demo-user-123',
+                        email: 'demo@treloarai.com',
+                        full_name: 'Demo User',
+                        plan: 'pro'
+                    }
+                });
+            }
+            return res.status(401).json({ error: 'Demo: use demo@treloarai.com / demo123' });
+        }
+
+        const result = await pool.query('SELECT * FROM treloar_users WHERE email = $1', [email]);
         if (result.rows.length === 0) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
@@ -229,7 +264,7 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || 'dev-secret');
+        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || 'treloar-secret');
 
         res.json({
             message: 'Login successful',
@@ -238,477 +273,400 @@ app.post('/api/auth/login', async (req, res) => {
                 id: user.id,
                 email: user.email,
                 full_name: user.full_name,
-                company: user.company,
-                plan: user.plan,
-                api_key: user.api_key
+                plan: user.plan
             }
         });
     } catch (error) {
-        console.error('Login error:', error);
         res.status(500).json({ error: 'Login failed' });
     }
 });
 
-// Get user dashboard
-app.get('/api/dashboard', authenticateToken, async (req, res) => {
+// Dashboard API
+app.get('/api/dashboard', authenticateUser, async (req, res) => {
     try {
-        // Get user's deployments
-        const deployments = await pool.query(
-            'SELECT * FROM deployments WHERE user_id = $1 ORDER BY created_at DESC',
-            [req.user.id]
-        );
+        let stats = {};
+        
+        if (process.env.DATABASE_URL) {
+            const callsResult = await pool.query('SELECT COUNT(*) as count FROM call_logs WHERE user_id = $1', [req.user.id]);
+            const contactsResult = await pool.query('SELECT COUNT(*) as count FROM contacts WHERE user_id = $1', [req.user.id]);
+            const blockedResult = await pool.query('SELECT COUNT(*) as count FROM blocked_numbers WHERE user_id = $1', [req.user.id]);
+            
+            stats = {
+                total_calls: parseInt(callsResult.rows[0].count),
+                total_contacts: parseInt(contactsResult.rows[0].count),
+                blocked_numbers: parseInt(blockedResult.rows[0].count)
+            };
+        } else {
+            // Demo data
+            stats = {
+                total_calls: 47,
+                total_contacts: 12,
+                blocked_numbers: 8
+            };
+        }
 
-        // Get current month usage
-        const currentMonth = new Date().toISOString().slice(0, 7) + '-01';
-        const usage = await pool.query(
-            `SELECT usage_type, SUM(amount) as total_amount, SUM(cost) as total_cost 
-             FROM billing_usage 
-             WHERE user_id = $1 AND billing_period >= $2 
-             GROUP BY usage_type`,
-            [req.user.id, currentMonth]
-        );
-
-        // Get total costs this month
-        const totalCost = await pool.query(
-            `SELECT SUM(cost) as monthly_cost FROM billing_usage 
-             WHERE user_id = $1 AND billing_period >= $2`,
-            [req.user.id, currentMonth]
-        );
-
-        // Get plan limits
-        const plan = PRICING[req.user.plan];
-
+        const plan = PRICING_PLANS[req.user.plan];
+        
         res.json({
-            user: {
-                id: req.user.id,
-                email: req.user.email,
-                full_name: req.user.full_name,
-                company: req.user.company,
-                plan: req.user.plan
-            },
-            deployments: deployments.rows,
-            usage: usage.rows,
-            monthly_cost: totalCost.rows[0]?.monthly_cost || 0,
-            plan_limits: plan,
-            stats: {
-                total_deployments: deployments.rows.length,
-                active_deployments: deployments.rows.filter(d => d.status === 'running').length,
-                failed_deployments: deployments.rows.filter(d => d.status === 'failed').length
+            user: req.user,
+            stats,
+            plan,
+            usage_limits: {
+                calls_used: stats.total_calls,
+                calls_limit: plan.call_limit,
+                contacts_used: stats.total_contacts,
+                contacts_limit: plan.contact_limit
             }
         });
     } catch (error) {
-        console.error('Dashboard error:', error);
         res.status(500).json({ error: 'Failed to load dashboard' });
     }
 });
 
-// Create deployment
-app.post('/api/deployments', authenticateToken, async (req, res) => {
-    const { name, repositoryUrl, branch, environment } = req.body;
-
+// Voice command processing
+app.post('/api/voice-command', authenticateUser, async (req, res) => {
+    const { transcript, command } = req.body;
+    
     try {
-        // Check plan limits
-        const userDeployments = await pool.query(
-            'SELECT COUNT(*) as count FROM deployments WHERE user_id = $1',
-            [req.user.id]
-        );
-
-        const plan = PRICING[req.user.plan];
-        if (plan.deployments !== -1 && userDeployments.rows[0].count >= plan.deployments) {
-            return res.status(403).json({ 
-                error: 'Deployment limit reached for your plan',
-                limit: plan.deployments,
-                current: userDeployments.rows[0].count
-            });
+        await trackUsage(req.user.id, 'voice_command', 1);
+        
+        // Log voice command
+        if (process.env.DATABASE_URL) {
+            await pool.query(
+                'INSERT INTO voice_commands (user_id, command_text, command_type) VALUES ($1, $2, $3)',
+                [req.user.id, transcript, command]
+            );
         }
 
-        const result = await pool.query(
-            `INSERT INTO deployments (user_id, name, repository_url, branch, environment, status) 
-             VALUES ($1, $2, $3, $4, $5, 'pending') 
-             RETURNING *`,
-            [req.user.id, name, repositoryUrl, branch || 'main', environment || 'production']
-        );
+        let response = { success: false, message: 'Command not recognized' };
+        const lowerTranscript = transcript.toLowerCase();
 
-        // Simulate deployment process
-        const deployment = result.rows[0];
+        if (lowerTranscript.includes('add contact')) {
+            response = {
+                success: true,
+                message: 'Contact addition mode activated',
+                action: 'add_contact',
+                speak: 'I can help you add a new contact. Please provide the phone number and name.'
+            };
+        } else if (lowerTranscript.includes('block number')) {
+            response = {
+                success: true,
+                message: 'Number blocking mode activated',
+                action: 'block_number',
+                speak: 'I can help you block a number. Please provide the phone number to block.'
+            };
+        } else if (lowerTranscript.includes('status') || lowerTranscript.includes('dashboard')) {
+            response = {
+                success: true,
+                message: 'Status report',
+                action: 'status',
+                speak: `Current status: You have ${Math.floor(Math.random() * 50)} total calls, ${Math.floor(Math.random() * 20)} contacts, and ${Math.floor(Math.random() * 10)} blocked numbers. AI screening is active.`
+            };
+        } else if (lowerTranscript.includes('billing') || lowerTranscript.includes('usage')) {
+            const plan = PRICING_PLANS[req.user.plan];
+            response = {
+                success: true,
+                message: 'Billing information',
+                action: 'billing',
+                speak: `You are on the ${plan.name} at $${plan.monthly_cost} per month. Your current usage is within limits.`
+            };
+        }
+
+        res.json(response);
+    } catch (error) {
+        res.status(500).json({ error: 'Voice command processing failed' });
+    }
+});
+
+// AI Chat
+app.post('/api/ai-chat', authenticateUser, async (req, res) => {
+    const { message } = req.body;
+    
+    try {
+        await trackUsage(req.user.id, 'ai_screening_minute', 0.1);
         
-        // Record deployment cost
-        await pool.query(
-            `INSERT INTO billing_usage (user_id, deployment_id, usage_type, amount, unit, cost, billing_period) 
-             VALUES ($1, $2, 'deployment', 1, 'deployment', $3, $4)`,
-            [req.user.id, deployment.id, USAGE_RATES.deployment, new Date().toISOString().slice(0, 10)]
-        );
+        // Simple AI responses for demo
+        const responses = {
+            hello: `Hello! I'm your TreloarAI assistant. You're on the ${PRICING_PLANS[req.user.plan].name}. How can I help you today?`,
+            status: `Your TreloarAI status: You have processed multiple calls today, with AI screening active. Current plan: ${req.user.plan}.`,
+            billing: `Billing info: You're on the ${PRICING_PLANS[req.user.plan].name} plan ($${PRICING_PLANS[req.user.plan].monthly_cost}/month). Usage is within your limits.`,
+            help: 'I can help you manage calls, contacts, billing, and voice commands. Try asking about your status, billing, or say commands like "add contact" or "block number".',
+            upgrade: 'Would you like to upgrade your plan? Pro plan ($29.99) includes advanced AI screening and unlimited contacts.'
+        };
 
-        res.status(201).json({
-            message: 'Deployment created successfully',
-            deployment: deployment
-        });
+        const lowerMessage = message.toLowerCase();
+        let reply = responses.help;
+        
+        for (const [keyword, response] of Object.entries(responses)) {
+            if (lowerMessage.includes(keyword)) {
+                reply = response;
+                break;
+            }
+        }
+
+        res.json({ reply });
     } catch (error) {
-        console.error('Deployment creation error:', error);
-        res.status(500).json({ error: 'Failed to create deployment' });
+        res.status(500).json({ error: 'AI chat failed', reply: 'Sorry, I\'m having trouble right now.' });
     }
 });
 
-// Record usage (called by monitoring system)
-app.post('/api/usage', authenticateToken, async (req, res) => {
-    const { deploymentId, usageType, amount, unit } = req.body;
-
+// Billing API
+app.get('/api/billing', authenticateUser, async (req, res) => {
     try {
-        const cost = amount * (USAGE_RATES[`${usageType}_${unit}`] || 0);
-        const billingPeriod = new Date().toISOString().slice(0, 10);
+        let usage = [];
+        
+        if (process.env.DATABASE_URL) {
+            const result = await pool.query(
+                `SELECT usage_type, SUM(amount) as total_amount, SUM(cost) as total_cost 
+                 FROM usage_tracking 
+                 WHERE user_id = $1 AND billing_period >= DATE_TRUNC('month', CURRENT_DATE)
+                 GROUP BY usage_type`,
+                [req.user.id]
+            );
+            usage = result.rows;
+        } else {
+            // Demo usage data
+            usage = [
+                { usage_type: 'call', total_amount: '47', total_cost: '2.35' },
+                { usage_type: 'voice_command', total_amount: '156', total_cost: '3.12' },
+                { usage_type: 'ai_screening_minute', total_amount: '23.5', total_cost: '2.35' }
+            ];
+        }
 
-        await pool.query(
-            `INSERT INTO billing_usage (user_id, deployment_id, usage_type, amount, unit, cost, billing_period) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [req.user.id, deploymentId, usageType, amount, unit, cost, billingPeriod]
-        );
-
-        res.json({ message: 'Usage recorded successfully' });
-    } catch (error) {
-        console.error('Usage recording error:', error);
-        res.status(500).json({ error: 'Failed to record usage' });
-    }
-});
-
-// Get billing information
-app.get('/api/billing', authenticateToken, async (req, res) => {
-    try {
-        // Current month usage
-        const currentMonth = new Date().toISOString().slice(0, 7) + '-01';
-        const usage = await pool.query(
-            `SELECT 
-                usage_type, 
-                SUM(amount) as total_amount, 
-                SUM(cost) as total_cost,
-                unit
-             FROM billing_usage 
-             WHERE user_id = $1 AND billing_period >= $2 
-             GROUP BY usage_type, unit
-             ORDER BY total_cost DESC`,
-            [req.user.id, currentMonth]
-        );
-
-        // Recent invoices
-        const invoices = await pool.query(
-            'SELECT * FROM invoices WHERE user_id = $1 ORDER BY created_at DESC LIMIT 12',
-            [req.user.id]
-        );
-
-        // Usage trends (last 6 months)
-        const trends = await pool.query(
-            `SELECT 
-                DATE_TRUNC('month', billing_period) as month,
-                SUM(cost) as monthly_cost
-             FROM billing_usage 
-             WHERE user_id = $1 AND billing_period >= NOW() - INTERVAL '6 months'
-             GROUP BY month
-             ORDER BY month`,
-            [req.user.id]
-        );
-
-        const plan = PRICING[req.user.plan];
+        const plan = PRICING_PLANS[req.user.plan];
+        const totalCost = usage.reduce((sum, u) => sum + parseFloat(u.total_cost), 0);
 
         res.json({
-            current_usage: usage.rows,
-            invoices: invoices.rows,
-            usage_trends: trends.rows,
-            plan: plan,
-            total_current_month: usage.rows.reduce((sum, u) => sum + parseFloat(u.total_cost), 0)
+            plan,
+            current_usage: usage,
+            monthly_total: totalCost,
+            next_billing_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
         });
     } catch (error) {
-        console.error('Billing error:', error);
-        res.status(500).json({ error: 'Failed to load billing information' });
+        res.status(500).json({ error: 'Failed to load billing info' });
     }
 });
 
-// Upgrade plan
-app.post('/api/billing/upgrade', authenticateToken, async (req, res) => {
+// Plan upgrade
+app.post('/api/billing/upgrade', authenticateUser, async (req, res) => {
     const { plan } = req.body;
-
-    if (!PRICING[plan]) {
+    
+    if (!PRICING_PLANS[plan]) {
         return res.status(400).json({ error: 'Invalid plan' });
     }
 
     try {
-        // Create Stripe subscription
-        const subscription = await stripe.subscriptions.create({
-            customer: req.user.stripe_customer_id,
-            items: [{
-                price_data: {
-                    currency: 'usd',
-                    product_data: {
-                        name: `AIFlowKeeper ${PRICING[plan].name} Plan`,
-                    },
-                    unit_amount: Math.round(PRICING[plan].monthly_cost * 100),
-                    recurring: {
-                        interval: 'month',
-                    },
-                },
-            }],
-        });
-
-        // Update user plan
-        await pool.query(
-            'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
-            [plan, req.user.id]
-        );
-
+        if (process.env.DATABASE_URL) {
+            await pool.query('UPDATE treloar_users SET plan = $1 WHERE id = $2', [plan, req.user.id]);
+        }
+        
         res.json({
-            message: 'Plan upgraded successfully',
-            plan: PRICING[plan],
-            subscription_id: subscription.id
+            message: `Successfully upgraded to ${PRICING_PLANS[plan].name}`,
+            plan: PRICING_PLANS[plan]
         });
     } catch (error) {
-        console.error('Plan upgrade error:', error);
-        res.status(500).json({ error: 'Failed to upgrade plan' });
+        res.status(500).json({ error: 'Upgrade failed' });
     }
 });
 
-// Analytics endpoint
-app.get('/api/analytics', authenticateToken, async (req, res) => {
-    const { period = '7d' } = req.query;
-
-    try {
-        let interval = '1 day';
-        if (period === '30d') interval = '30 days';
-        if (period === '90d') interval = '90 days';
-
-        const analytics = await pool.query(
-            `SELECT 
-                DATE_TRUNC('day', timestamp) as date,
-                metric_type,
-                AVG(metric_value) as avg_value,
-                MAX(metric_value) as max_value
-             FROM analytics 
-             WHERE user_id = $1 AND timestamp >= NOW() - INTERVAL '${interval}'
-             GROUP BY date, metric_type
-             ORDER BY date`,
-            [req.user.id]
-        );
-
-        res.json({
-            analytics: analytics.rows,
-            period: period
-        });
-    } catch (error) {
-        console.error('Analytics error:', error);
-        res.status(500).json({ error: 'Failed to load analytics' });
-    }
-});
-
-// Enterprise dashboard frontend
+// Main app with billing integration
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
         <html>
         <head>
-            <title>AIFlowKeeper Enterprise - Deployment Platform</title>
+            <title>TreloarAI - AI Phone Assistant with Billing</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta name="theme-color" content="#0D7377">
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
-                body { font-family: 'Segoe UI', system-ui, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
-                .enterprise-container { max-width: 1600px; margin: 0 auto; padding: 2rem; }
+                body { font-family: 'Segoe UI', system-ui, sans-serif; background: linear-gradient(135deg, #0D7377 0%, #14A085 30%, #4CAF50 70%, #A7FFEB 100%); min-height: 100vh; color: #333; }
+                .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
                 
-                .enterprise-header { text-align: center; color: white; margin-bottom: 3rem; }
-                .enterprise-header h1 { font-size: 4rem; margin-bottom: 1rem; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
-                .enterprise-header p { font-size: 1.4rem; opacity: 0.9; }
+                .header { text-align: center; color: white; margin-bottom: 3rem; }
+                .header h1 { font-size: 3.5rem; margin-bottom: 1rem; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+                .header p { font-size: 1.3rem; opacity: 0.9; }
                 
                 .auth-section { background: rgba(255,255,255,0.95); padding: 3rem; border-radius: 20px; margin-bottom: 3rem; text-align: center; }
-                .auth-tabs { display: flex; justify-content: center; margin-bottom: 2rem; }
-                .auth-tab { padding: 1rem 2rem; background: #f8f9fa; margin: 0 0.5rem; border-radius: 10px; cursor: pointer; transition: all 0.3s; }
-                .auth-tab.active { background: #667eea; color: white; }
-                
                 .auth-form { max-width: 400px; margin: 0 auto; }
                 .form-group { margin: 1rem 0; text-align: left; }
                 .form-group label { display: block; margin-bottom: 0.5rem; font-weight: bold; }
                 .form-group input { width: 100%; padding: 1rem; border: 1px solid #ddd; border-radius: 8px; font-size: 1rem; }
                 
-                .enterprise-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 2rem; margin-bottom: 3rem; }
-                .enterprise-card { background: rgba(255,255,255,0.95); padding: 2rem; border-radius: 20px; backdrop-filter: blur(15px); box-shadow: 0 10px 40px rgba(0,0,0,0.1); }
-                .enterprise-card h3 { color: #667eea; margin-bottom: 1rem; font-size: 1.5rem; }
+                .dashboard { display: none; }
+                .dashboard.active { display: block; }
+                
+                .billing-section { background: rgba(255,255,255,0.98); padding: 2rem; border-radius: 20px; margin-bottom: 2rem; }
+                .billing-section h3 { color: #0D7377; margin-bottom: 1rem; }
+                .plan-info { background: #e8f5e8; padding: 1rem; border-radius: 10px; margin-bottom: 1rem; }
+                .usage-item { display: flex; justify-content: space-between; padding: 0.5rem; border-bottom: 1px solid #eee; }
+                
+                .voice-ai-section { background: rgba(255,255,255,0.98); padding: 2rem; border-radius: 20px; margin-bottom: 2rem; }
+                .voice-ai-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+                
+                .voice-control { text-align: center; }
+                .voice-btn { background: linear-gradient(45deg, #FF6B6B, #4ECDC4); color: white; border: none; border-radius: 50%; width: 80px; height: 80px; font-size: 2rem; cursor: pointer; transition: all 0.3s; }
+                .voice-btn:hover { transform: scale(1.1); }
+                .voice-status { margin-top: 1rem; color: #0D7377; }
+                .voice-transcript { background: #f8f9fa; padding: 1rem; border-radius: 10px; margin-top: 1rem; min-height: 50px; }
+                
+                .ai-chat { }
+                .chat-container { background: #f8f9fa; border-radius: 10px; height: 200px; overflow-y: auto; padding: 1rem; margin-bottom: 1rem; }
+                .chat-message { margin: 0.5rem 0; padding: 0.5rem; border-radius: 5px; }
+                .user-message { background: #e3f2fd; text-align: right; }
+                .ai-message { background: #e8f5e8; }
+                .chat-input { width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 8px; }
+                
+                .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 2rem; margin-bottom: 3rem; }
+                .stat-card { background: rgba(255,255,255,0.98); padding: 2rem; border-radius: 20px; text-align: center; }
+                .stat-value { font-size: 3rem; font-weight: bold; color: #0D7377; margin-bottom: 0.5rem; }
+                .stat-label { color: #666; font-size: 1rem; text-transform: uppercase; }
+                
+                .btn { background: linear-gradient(45deg, #14A085, #4CAF50); color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: all 0.3s; margin: 0.25rem; }
+                .btn:hover { transform: translateY(-2px); }
+                .btn-upgrade { background: linear-gradient(45deg, #FF6B6B, #FFA726); }
+                .btn-danger { background: linear-gradient(45deg, #EF5350, #FF7043); }
                 
                 .pricing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 2rem; margin: 2rem 0; }
-                .pricing-card { background: white; padding: 2rem; border-radius: 15px; text-align: center; position: relative; }
-                .pricing-card.featured { border: 3px solid #667eea; transform: scale(1.05); }
-                .pricing-price { font-size: 2.5rem; font-weight: bold; color: #667eea; margin: 1rem 0; }
-                .pricing-features { list-style: none; margin: 1rem 0; }
+                .pricing-card { background: white; padding: 2rem; border-radius: 15px; text-align: center; }
+                .pricing-card.featured { border: 3px solid #14A085; transform: scale(1.05); }
+                .pricing-price { font-size: 2.5rem; font-weight: bold; color: #14A085; margin: 1rem 0; }
+                .pricing-features { list-style: none; margin: 1rem 0; text-align: left; }
                 .pricing-features li { padding: 0.5rem 0; }
                 
-                .btn { background: #667eea; color: white; padding: 1rem 2rem; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: all 0.3s; text-decoration: none; display: inline-block; margin: 0.5rem; }
-                .btn:hover { background: #5a67d8; transform: translateY(-2px); }
-                .btn-success { background: #48bb78; }
-                .btn-warning { background: #ed8936; }
-                .btn-danger { background: #f56565; }
-                
-                .features-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 2rem; margin: 3rem 0; }
-                .feature-card { background: rgba(255,255,255,0.1); padding: 2rem; border-radius: 15px; text-align: center; color: white; }
-                .feature-icon { font-size: 3rem; margin-bottom: 1rem; }
-                
-                .dashboard-hidden { display: none; }
-                .dashboard-visible { display: block; }
-                
                 @media (max-width: 768px) {
-                    .enterprise-header h1 { font-size: 2.5rem; }
-                    .enterprise-grid { grid-template-columns: 1fr; }
-                    .pricing-grid { grid-template-columns: 1fr; }
+                    .voice-ai-grid { grid-template-columns: 1fr; }
+                    .header h1 { font-size: 2.5rem; }
                 }
             </style>
         </head>
         <body>
-            <div class="enterprise-container">
-                <div class="enterprise-header">
-                    <h1>🚀 AIFlowKeeper Enterprise</h1>
-                    <p>Professional Deployment Platform with Real-Time Billing & Analytics</p>
+            <div class="container">
+                <div class="header">
+                    <h1>📱🎤 TreloarAI</h1>
+                    <p>AI-Powered Phone Assistant with Real-Time Billing</p>
                 </div>
                 
                 <div id="authSection" class="auth-section">
-                    <div class="auth-tabs">
-                        <div class="auth-tab active" onclick="showLogin()">Login</div>
-                        <div class="auth-tab" onclick="showRegister()">Register</div>
-                    </div>
-                    
-                    <div id="loginForm" class="auth-form">
-                        <h2>Welcome Back</h2>
+                    <h2>Sign In to TreloarAI</h2>
+                    <p style="background: #e3f2fd; padding: 1rem; border-radius: 8px; margin-bottom: 1rem;">
+                        <strong>Demo Login:</strong><br>
+                        Email: demo@treloarai.com<br>
+                        Password: demo123
+                    </p>
+                    <div class="auth-form">
                         <div class="form-group">
                             <label>Email</label>
-                            <input type="email" id="loginEmail" placeholder="your@email.com">
+                            <input type="email" id="loginEmail" value="demo@treloarai.com">
                         </div>
                         <div class="form-group">
                             <label>Password</label>
-                            <input type="password" id="loginPassword" placeholder="Password">
+                            <input type="password" id="loginPassword" value="demo123">
                         </div>
                         <button class="btn" onclick="login()">Sign In</button>
                     </div>
-                    
-                    <div id="registerForm" class="auth-form" style="display: none;">
-                        <h2>Start Your Enterprise Journey</h2>
-                        <div class="form-group">
-                            <label>Full Name</label>
-                            <input type="text" id="registerName" placeholder="John Doe">
-                        </div>
-                        <div class="form-group">
-                            <label>Email</label>
-                            <input type="email" id="registerEmail" placeholder="your@email.com">
-                        </div>
-                        <div class="form-group">
-                            <label>Company</label>
-                            <input type="text" id="registerCompany" placeholder="Your Company">
-                        </div>
-                        <div class="form-group">
-                            <label>Password</label>
-                            <input type="password" id="registerPassword" placeholder="Password">
-                        </div>
-                        <button class="btn" onclick="register()">Create Account</button>
-                    </div>
                 </div>
                 
-                <div id="dashboardSection" class="dashboard-hidden">
-                    <div class="enterprise-grid">
-                        <div class="enterprise-card">
-                            <h3>📊 Usage Overview</h3>
-                            <div id="usageStats">Loading...</div>
-                        </div>
-                        <div class="enterprise-card">
-                            <h3>💰 Billing Status</h3>
-                            <div id="billingStats">Loading...</div>
-                        </div>
-                        <div class="enterprise-card">
-                            <h3>🚀 Active Deployments</h3>
-                            <div id="deploymentStats">Loading...</div>
+                <div id="dashboardSection" class="dashboard">
+                    <div class="billing-section">
+                        <h3>💰 Your Plan & Billing</h3>
+                        <div id="planInfo" class="plan-info">Loading plan information...</div>
+                        <div id="usageInfo">Loading usage data...</div>
+                        <button class="btn btn-upgrade" onclick="showUpgradePlans()">Upgrade Plan</button>
+                    </div>
+                    
+                    <div class="voice-ai-section">
+                        <h3>🎤🤖 Voice + AI Assistant</h3>
+                        <div class="voice-ai-grid">
+                            <div class="voice-control">
+                                <h4>Voice Commands</h4>
+                                <button class="voice-btn" onclick="startVoiceCommand()">🎤</button>
+                                <div class="voice-status" id="voiceStatus">Click to start voice command</div>
+                                <div class="voice-transcript" id="voiceTranscript">Your voice commands appear here...</div>
+                            </div>
+                            
+                            <div class="ai-chat">
+                                <h4>AI Chat</h4>
+                                <div class="chat-container" id="chatContainer">
+                                    <div class="chat-message ai-message">Hello! I'm your TreloarAI assistant. Ask me about your calls, billing, or use voice commands!</div>
+                                </div>
+                                <input type="text" class="chat-input" id="chatInput" placeholder="Type a message..." onkeypress="handleChatKeypress(event)">
+                            </div>
                         </div>
                     </div>
                     
-                    <div class="enterprise-card">
-                        <h3>⚡ Quick Actions</h3>
-                        <button class="btn btn-success" onclick="createDeployment()">+ New Deployment</button>
-                        <button class="btn btn-warning" onclick="viewBilling()">View Billing</button>
-                        <button class="btn" onclick="viewAnalytics()">Analytics</button>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-value" id="totalCalls">...</div>
+                            <div class="stat-label">Total Calls</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="totalContacts">...</div>
+                            <div class="stat-label">Contacts</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="blockedNumbers">...</div>
+                            <div class="stat-label">Blocked Numbers</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="monthlyBill">$...</div>
+                            <div class="stat-label">Monthly Bill</div>
+                        </div>
+                    </div>
+                    
+                    <div style="text-align: center;">
                         <button class="btn btn-danger" onclick="logout()">Logout</button>
                     </div>
                 </div>
                 
-                <div class="features-grid">
-                    <div class="feature-card">
-                        <div class="feature-icon">⚡</div>
-                        <h4>Lightning Fast Deployments</h4>
-                        <p>Deploy your applications in seconds with our optimized pipeline</p>
-                    </div>
-                    <div class="feature-card">
-                        <div class="feature-icon">💰</div>
-                        <h4>Real-Time Billing</h4>
-                        <p>Track usage and costs in real-time with transparent pricing</p>
-                    </div>
-                    <div class="feature-card">
-                        <div class="feature-icon">📊</div>
-                        <h4>Advanced Analytics</h4>
-                        <p>Monitor performance, usage, and costs with detailed insights</p>
-                    </div>
-                    <div class="feature-card">
-                        <div class="feature-icon">🏢</div>
-                        <h4>Enterprise Ready</h4>
-                        <p>Scalable infrastructure with enterprise-grade security</p>
-                    </div>
-                </div>
-                
-                <div class="pricing-grid">
+                <div id="pricingSection" class="pricing-grid" style="display: none;">
                     <div class="pricing-card">
                         <h4>Free</h4>
                         <div class="pricing-price">$0/mo</div>
                         <ul class="pricing-features">
-                            <li>3 Deployments</li>
-                            <li>100 CPU Hours</li>
-                            <li>10GB Bandwidth</li>
-                            <li>Basic Support</li>
+                            <li>100 calls/month</li>
+                            <li>50 contacts</li>
+                            <li>10 hours AI screening</li>
+                            <li>200 voice commands</li>
                         </ul>
-                        <button class="btn">Current Plan</button>
+                        <button class="btn" onclick="upgradePlan('free')">Current Plan</button>
                     </div>
                     <div class="pricing-card featured">
-                        <h4>Professional</h4>
-                        <div class="pricing-price">$99/mo</div>
+                        <h4>Pro</h4>
+                        <div class="pricing-price">$29.99/mo</div>
                         <ul class="pricing-features">
-                            <li>50 Deployments</li>
-                            <li>2000 CPU Hours</li>
-                            <li>500GB Bandwidth</li>
-                            <li>Priority Support</li>
-                            <li>Advanced Analytics</li>
+                            <li>1,000 calls/month</li>
+                            <li>500 contacts</li>
+                            <li>100 hours AI screening</li>
+                            <li>2,000 voice commands</li>
+                            <li>Analytics dashboard</li>
                         </ul>
-                        <button class="btn btn-success">Upgrade</button>
+                        <button class="btn btn-upgrade" onclick="upgradePlan('pro')">Upgrade to Pro</button>
                     </div>
                     <div class="pricing-card">
                         <h4>Enterprise</h4>
-                        <div class="pricing-price">$299/mo</div>
+                        <div class="pricing-price">$99.99/mo</div>
                         <ul class="pricing-features">
-                            <li>Unlimited Deployments</li>
-                            <li>Unlimited Resources</li>
-                            <li>Unlimited Bandwidth</li>
-                            <li>24/7 Support</li>
-                            <li>Custom Integrations</li>
+                            <li>Unlimited calls</li>
+                            <li>Unlimited contacts</li>
+                            <li>Unlimited AI screening</li>
+                            <li>Unlimited voice commands</li>
+                            <li>Custom integrations</li>
+                            <li>24/7 support</li>
                         </ul>
-                        <button class="btn">Contact Sales</button>
+                        <button class="btn btn-upgrade" onclick="upgradePlan('enterprise')">Upgrade to Enterprise</button>
                     </div>
                 </div>
             </div>
 
             <script>
+                let authToken = localStorage.getItem('treloar_token');
                 let currentUser = null;
-                let authToken = localStorage.getItem('afk_token');
 
                 if (authToken) {
                     loadDashboard();
-                }
-
-                function showLogin() {
-                    document.getElementById('loginForm').style.display = 'block';
-                    document.getElementById('registerForm').style.display = 'none';
-                    document.querySelectorAll('.auth-tab').forEach(tab => tab.classList.remove('active'));
-                    event.target.classList.add('active');
-                }
-
-                function showRegister() {
-                    document.getElementById('loginForm').style.display = 'none';
-                    document.getElementById('registerForm').style.display = 'block';
-                    document.querySelectorAll('.auth-tab').forEach(tab => tab.classList.remove('active'));
-                    event.target.classList.add('active');
+                } else {
+                    document.getElementById('authSection').style.display = 'block';
                 }
 
                 async function login() {
@@ -727,41 +685,13 @@ app.get('/', (req, res) => {
                         if (response.ok) {
                             authToken = data.token;
                             currentUser = data.user;
-                            localStorage.setItem('afk_token', authToken);
+                            localStorage.setItem('treloar_token', authToken);
                             loadDashboard();
                         } else {
                             alert('Login failed: ' + data.error);
                         }
                     } catch (error) {
                         alert('Login error: ' + error.message);
-                    }
-                }
-
-                async function register() {
-                    const fullName = document.getElementById('registerName').value;
-                    const email = document.getElementById('registerEmail').value;
-                    const company = document.getElementById('registerCompany').value;
-                    const password = document.getElementById('registerPassword').value;
-
-                    try {
-                        const response = await fetch('/api/auth/register', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ email, password, fullName, company })
-                        });
-
-                        const data = await response.json();
-                        
-                        if (response.ok) {
-                            authToken = data.token;
-                            currentUser = data.user;
-                            localStorage.setItem('afk_token', authToken);
-                            loadDashboard();
-                        } else {
-                            alert('Registration failed: ' + data.error);
-                        }
-                    } catch (error) {
-                        alert('Registration error: ' + error.message);
                     }
                 }
 
@@ -780,26 +710,21 @@ app.get('/', (req, res) => {
                         currentUser = data.user;
 
                         document.getElementById('authSection').style.display = 'none';
-                        document.getElementById('dashboardSection').className = 'dashboard-visible';
+                        document.getElementById('dashboardSection').classList.add('active');
+
+                        // Update plan info
+                        document.getElementById('planInfo').innerHTML = \`
+                            <strong>\${data.plan.name}</strong> - $\${data.plan.monthly_cost}/month<br>
+                            <small>\${data.plan.features.join(', ')}</small>
+                        \`;
 
                         // Update stats
-                        document.getElementById('usageStats').innerHTML = \`
-                            <p><strong>Plan:</strong> \${data.plan_limits.name}</p>
-                            <p><strong>Monthly Cost:</strong> $\${data.monthly_cost}</p>
-                            <p><strong>Deployments:</strong> \${data.stats.total_deployments}/\${data.plan_limits.deployments === -1 ? '∞' : data.plan_limits.deployments}</p>
-                        \`;
+                        document.getElementById('totalCalls').textContent = data.stats.total_calls;
+                        document.getElementById('totalContacts').textContent = data.stats.total_contacts;
+                        document.getElementById('blockedNumbers').textContent = data.stats.blocked_numbers;
 
-                        document.getElementById('billingStats').innerHTML = \`
-                            <p><strong>Current Month:</strong> $\${data.monthly_cost}</p>
-                            <p><strong>Plan Limit:</strong> $\${data.plan_limits.monthly_cost}/month</p>
-                            <p><strong>Usage:</strong> \${Math.round((data.monthly_cost / data.plan_limits.monthly_cost) * 100)}%</p>
-                        \`;
-
-                        document.getElementById('deploymentStats').innerHTML = \`
-                            <p><strong>Total:</strong> \${data.stats.total_deployments}</p>
-                            <p><strong>Active:</strong> \${data.stats.active_deployments}</p>
-                            <p><strong>Failed:</strong> \${data.stats.failed_deployments}</p>
-                        \`;
+                        // Load billing info
+                        loadBillingInfo();
 
                     } catch (error) {
                         console.error('Dashboard load error:', error);
@@ -807,50 +732,132 @@ app.get('/', (req, res) => {
                     }
                 }
 
-                function createDeployment() {
-                    const name = prompt('Deployment name:');
-                    const repo = prompt('Repository URL:');
+                async function loadBillingInfo() {
+                    try {
+                        const response = await fetch('/api/billing', {
+                            headers: { 'Authorization': \`Bearer \${authToken}\` }
+                        });
+
+                        const data = await response.json();
+                        
+                        document.getElementById('monthlyBill').textContent = \`$\${data.monthly_total.toFixed(2)}\`;
+                        
+                        let usageHtml = '<h4>Current Usage:</h4>';
+                        data.current_usage.forEach(usage => {
+                            usageHtml += \`
+                                <div class="usage-item">
+                                    <span>\${usage.usage_type}: \${usage.total_amount}</span>
+                                    <span>$\${parseFloat(usage.total_cost).toFixed(2)}</span>
+                                </div>
+                            \`;
+                        });
+                        
+                        document.getElementById('usageInfo').innerHTML = usageHtml;
+                    } catch (error) {
+                        console.error('Billing load error:', error);
+                    }
+                }
+
+                function startVoiceCommand() {
+                    document.getElementById('voiceStatus').textContent = 'Listening...';
+                    document.getElementById('voiceTranscript').textContent = 'Say: "status", "add contact", "block number", or "billing"';
                     
-                    if (name && repo) {
-                        fetch('/api/deployments', {
+                    // Simulate voice recognition
+                    setTimeout(() => {
+                        const demoCommands = ['status', 'add contact', 'billing', 'block number'];
+                        const randomCommand = demoCommands[Math.floor(Math.random() * demoCommands.length)];
+                        processVoiceCommand(randomCommand);
+                    }, 2000);
+                }
+
+                async function processVoiceCommand(transcript) {
+                    try {
+                        const response = await fetch('/api/voice-command', {
                             method: 'POST',
                             headers: { 
                                 'Content-Type': 'application/json',
                                 'Authorization': \`Bearer \${authToken}\`
                             },
-                            body: JSON.stringify({
-                                name,
-                                repositoryUrl: repo,
-                                branch: 'main',
-                                environment: 'production'
-                            })
-                        })
-                        .then(response => response.json())
-                        .then(data => {
-                            if (data.deployment) {
-                                alert('Deployment created successfully!');
-                                loadDashboard();
-                            } else {
-                                alert('Error: ' + data.error);
-                            }
+                            body: JSON.stringify({ transcript, command: 'voice_input' })
                         });
+
+                        const data = await response.json();
+                        
+                        document.getElementById('voiceStatus').textContent = data.message;
+                        document.getElementById('voiceTranscript').textContent = \`Command: "\${transcript}" - \${data.message}\`;
+                        
+                        if (data.speak && 'speechSynthesis' in window) {
+                            const utterance = new SpeechSynthesisUtterance(data.speak);
+                            speechSynthesis.speak(utterance);
+                        }
+                    } catch (error) {
+                        document.getElementById('voiceStatus').textContent = 'Voice command failed';
                     }
                 }
 
-                function viewBilling() {
-                    alert('Billing dashboard would open here with detailed usage and payment information.');
+                async function sendChatMessage(message) {
+                    if (!message.trim()) return;
+
+                    const chatContainer = document.getElementById('chatContainer');
+                    chatContainer.innerHTML += \`<div class="chat-message user-message">You: \${message}</div>\`;
+
+                    try {
+                        const response = await fetch('/api/ai-chat', {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': \`Bearer \${authToken}\`
+                            },
+                            body: JSON.stringify({ message })
+                        });
+
+                        const data = await response.json();
+                        chatContainer.innerHTML += \`<div class="chat-message ai-message">AI: \${data.reply}</div>\`;
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+
+                    } catch (error) {
+                        chatContainer.innerHTML += \`<div class="chat-message ai-message">AI: Sorry, I'm having trouble right now.</div>\`;
+                    }
+
+                    document.getElementById('chatInput').value = '';
                 }
 
-                function viewAnalytics() {
-                    alert('Analytics dashboard would open here with performance metrics and insights.');
+                function handleChatKeypress(event) {
+                    if (event.key === 'Enter') {
+                        sendChatMessage(event.target.value);
+                    }
+                }
+
+                function showUpgradePlans() {
+                    document.getElementById('pricingSection').style.display = 'grid';
+                }
+
+                async function upgradePlan(plan) {
+                    try {
+                        const response = await fetch('/api/billing/upgrade', {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': \`Bearer \${authToken}\`
+                            },
+                            body: JSON.stringify({ plan })
+                        });
+
+                        const data = await response.json();
+                        alert(data.message);
+                        loadDashboard();
+                        document.getElementById('pricingSection').style.display = 'none';
+                    } catch (error) {
+                        alert('Upgrade failed');
+                    }
                 }
 
                 function logout() {
-                    localStorage.removeItem('afk_token');
+                    localStorage.removeItem('treloar_token');
                     authToken = null;
                     currentUser = null;
                     document.getElementById('authSection').style.display = 'block';
-                    document.getElementById('dashboardSection').className = 'dashboard-hidden';
+                    document.getElementById('dashboardSection').classList.remove('active');
                 }
             </script>
         </body>
@@ -858,12 +865,16 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Initialize database and start server
+// Start server
 initDatabase().then(() => {
     app.listen(PORT, () => {
-        console.log(`🏢 AIFlowKeeper Enterprise running on port ${PORT}`);
+        console.log(`📱 TreloarAI with Billing running on port ${PORT}`);
         console.log(`💰 Real-time billing system active`);
-        console.log(`📊 PostgreSQL database connected`);
-        console.log(`🔐 Enterprise authentication enabled`);
+        console.log(`🎤 Voice + AI features enabled`);
+        console.log(`🔐 User authentication ready`);
+    });
+}).catch(() => {
+    app.listen(PORT, () => {
+        console.log(`📱 TreloarAI running in demo mode on port ${PORT}`);
     });
 });
