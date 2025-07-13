@@ -437,32 +437,17 @@ function generateAIResponse(message, user) {
     }
 }
 
-// PWA Manifest
+// PWA Manifest (simplified to avoid auto-install prompts)
 app.get('/manifest.json', (req, res) => {
     res.json({
-        "name": "TreloarAI - Voice AI Assistant",
+        "name": "TreloarAI Voice Assistant",
         "short_name": "TreloarAI",
-        "description": "Intelligent voice assistant with call recording and AI transcription",
+        "description": "Voice AI assistant with call recording",
         "start_url": "/",
-        "display": "standalone",
+        "display": "browser", // Changed from "standalone" to avoid app install prompts
         "background_color": "#0d7377",
         "theme_color": "#14a085",
-        "orientation": "portrait",
-        "categories": ["productivity", "communication", "utilities"],
-        "icons": [
-            {
-                "src": "/icon-192.png",
-                "sizes": "192x192",
-                "type": "image/png",
-                "purpose": "any maskable"
-            },
-            {
-                "src": "/icon-512.png",
-                "sizes": "512x512", 
-                "type": "image/png",
-                "purpose": "any maskable"
-            }
-        ]
+        "orientation": "portrait"
     });
 });
 
@@ -1111,9 +1096,15 @@ app.get('/', (req, res) => {
                             </div>
                             <div class="chat-input">
                                 <input type="text" id="chatInput" placeholder="Ask about recordings, transcription, or voice features..." onkeypress="handleChatKeypress(event)">
-                                <button class="btn btn-primary" onclick="sendChatMessage()">
+                                <button class="btn btn-primary" onclick="sendChatMessage()" style="min-width: 60px; display: flex; align-items: center; justify-content: center;">
                                     <i class="fas fa-paper-plane"></i>
                                 </button>
+                            </div>
+                            
+                            <div style="text-align: center; margin-top: 15px;">
+                                <p style="color: #94a3b8; font-size: 0.9rem;">
+                                    💡 Try asking: "How do I record calls?", "Explain transcription", "Show my usage"
+                                </p>
                             </div>
                         </div>
                     </div>
