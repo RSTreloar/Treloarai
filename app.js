@@ -169,6 +169,7 @@ app.get('/health', (req, res) => {
 
 // Main application
 app.get('/', (req, res) => {
+res.setHeader('Content-Type', 'text/html');
     res.send(`<!DOCTYPE html>
 <html>
 <head>
